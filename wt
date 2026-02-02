@@ -1,0 +1,1176 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# wt - git worktree helper
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Installation:
+#   1. Place this file somewhere in your PATH (e.g., ~/.local/bin/wt)
+#   2. Run: wt install
+#
+# Manual setup (alternative to wt install):
+#   Add to your .bashrc/.zshrc: eval "$(wt init)"
+
+WT_VERSION="0.1.0"
+WT_RAW_URL="https://raw.githubusercontent.com/GuyAglionby/wt/main/wt"
+
+# ─── Usage ────────────────────────────────────────────────────────────────────
+
+usage() {
+    cat <<EOF
+wt - git worktree helper
+
+Usage: wt <command> [args]
+
+Commands:
+  add <branch>              Create worktree at ../worktree--{repo}--{branch}
+  rm <branch>... [options]  Remove worktree(s) and branch (if unchanged)
+  cd [branch]               Change to worktree for branch, or main repo if no arg
+  mv <new-branch>           Rename current worktree's branch and move directory
+  list                      List worktrees
+  copy <branch> <path>...   Copy files from another worktree
+  copy <path>... <branch>   Copy files to another worktree
+  base [branch]             Show the commit a worktree was spawned from
+  sync-agent [branch]      Sync agent files from worktree to main repo
+  venv                      Replace symlinked .venv with a real one (uv sync)
+  init [bash|zsh]           Output shell integration for eval
+  install                   Add shell integration to your rc file
+  update                    Update wt to the latest version
+  version                   Show version
+
+Run 'wt <command> --help' for command-specific options.
+EOF
+    exit "${1:-1}"
+}
+
+usage_rm() {
+    cat <<EOF
+wt rm - remove worktree(s) and delete branch if unchanged
+
+Usage: wt rm <branch>... [options]
+
+Options:
+  --force, -f               Force remove worktree with uncommitted/untracked files
+  --force-delete-branch     Delete branch even if it has commits (implies --force)
+  -h, --help                Show this help
+EOF
+    exit "${1:-0}"
+}
+
+usage_copy() {
+    cat <<EOF
+wt copy - copy files between worktrees
+
+Usage: wt copy <branch> <path>...   (pull from another worktree)
+       wt copy <path>... <branch>   (push to another worktree)
+
+Options:
+  --include-untracked       Include untracked files (default: tracked only)
+  --overwrite               Overwrite conflicting files instead of failing
+  -h, --help                Show this help
+EOF
+    exit "${1:-0}"
+}
+
+# ─── Utilities ────────────────────────────────────────────────────────────────
+
+get_repo_root() {
+    local git_common_dir
+    git_common_dir=$(git rev-parse --git-common-dir 2>/dev/null) || {
+        echo "Error: not in a git repository" >&2
+        exit 1
+    }
+    dirname "$(cd "$git_common_dir" && pwd)"
+}
+
+get_worktree_path() {
+    local repo_root="$1"
+    local branch="$2"
+    local repo_name
+    repo_name=$(basename "$repo_root")
+    local parent_dir
+    parent_dir=$(dirname "$repo_root")
+    echo "${parent_dir}/worktree--${repo_name}--${branch}"
+}
+
+get_worktree_name() {
+    local worktree_path="$1"
+    basename "$(git -C "$worktree_path" rev-parse --git-dir)"
+}
+
+normalize_branch() {
+    local branch="$1"
+    if [[ "$branch" == worktree--*--* ]]; then
+        echo "${branch#worktree--*--}"
+    else
+        echo "$branch"
+    fi
+}
+
+find_worktree_for_branch() {
+    local repo_root="$1"
+    local branch="$2"
+    git -C "$repo_root" worktree list --porcelain | awk -v branch="refs/heads/$branch" '
+        /^worktree / { path = substr($0, 10) }
+        /^branch / && $2 == branch { print path; exit }
+    '
+}
+
+find_branch_for_worktree() {
+    local repo_root="$1"
+    local worktree_path="$2"
+    git -C "$repo_root" worktree list --porcelain \
+        | grep -A2 "^worktree ${worktree_path}$" \
+        | grep "^branch " \
+        | sed 's|^branch refs/heads/||'
+}
+
+resolve_worktree() {
+    local arg="$1"
+    local repo_root="$2"
+
+    local worktree_path
+    if [[ -d "$arg" ]]; then
+        worktree_path=$(cd "$arg" && git rev-parse --show-toplevel 2>/dev/null) || {
+            echo "Error: '$arg' is not inside a git repository" >&2
+            return 1
+        }
+    else
+        local branch
+        branch=$(normalize_branch "$arg")
+        worktree_path=$(find_worktree_for_branch "$repo_root" "$branch")
+    fi
+
+    if [[ -z "$worktree_path" ]]; then
+        echo "Error: no worktree found for '$arg'" >&2
+        return 1
+    fi
+
+    if ! git -C "$repo_root" worktree list --porcelain | grep -q "^worktree ${worktree_path}$"; then
+        echo "Error: '$arg' is not a known worktree" >&2
+        return 1
+    fi
+
+    echo "$worktree_path"
+}
+
+# Default agent file patterns. Patterns containing "/" use find -path (where *
+# matches any character including "/", so these handle arbitrary nesting).
+# Patterns without "/" use find -name.
+# Extend with WT_AGENT_PATTERNS (colon-separated, e.g. "COPILOT.md:*/.my-agent/config/*").
+AGENT_FILE_PATTERNS=(
+    "CLAUDE.md"
+    "AGENTS.md"
+    ".cursorrules"
+    "*/.claude/skills/*"
+    "*/.cursor/rules/*"
+    "*/.codex/skills/*"
+)
+
+find_agent_files() {
+    local dir="$1"
+    local patterns=("${AGENT_FILE_PATTERNS[@]}")
+
+    if [[ -n "${WT_AGENT_PATTERNS:-}" ]]; then
+        IFS=':' read -ra user_patterns <<< "$WT_AGENT_PATTERNS"
+        patterns+=("${user_patterns[@]}")
+    fi
+
+    local find_args=()
+    local first=1
+    for pattern in "${patterns[@]}"; do
+        [[ -z "$pattern" ]] && continue
+        if [[ $first -eq 0 ]]; then
+            find_args+=("-o")
+        fi
+        first=0
+        if [[ "$pattern" == */* ]]; then
+            find_args+=("-path" "$pattern")
+        else
+            find_args+=("-name" "$pattern")
+        fi
+    done
+
+    find "$dir" \( "${find_args[@]}" \) -type f 2>/dev/null
+}
+
+copy_agent_files_to_worktree() {
+    local repo_root="$1"
+    local worktree_path="$2"
+
+    while IFS= read -r repo_file; do
+        [[ -z "$repo_file" ]] && continue
+        local rel_path="${repo_file#"$repo_root"/}"
+        local wt_file="${worktree_path}/${rel_path}"
+        if [[ ! -f "$wt_file" ]]; then
+            echo "Copying agent file: $rel_path"
+            mkdir -p "$(dirname "$wt_file")"
+            cp "$repo_file" "$wt_file"
+        fi
+    done < <(find_agent_files "$repo_root")
+}
+
+save_agent_base() {
+    local repo_root="$1"
+    local worktree_name="$2"
+    local base_dir="${repo_root}/.git/worktrees/${worktree_name}/agent_base"
+
+    rm -rf "$base_dir"
+    while IFS= read -r repo_file; do
+        [[ -z "$repo_file" ]] && continue
+        local rel_path="${repo_file#"$repo_root"/}"
+        local dest="${base_dir}/${rel_path}"
+        mkdir -p "$(dirname "$dest")"
+        cp "$repo_file" "$dest"
+    done < <(find_agent_files "$repo_root")
+}
+
+sync_agent_files() {
+    local worktree_path="$1"
+    local repo_root="$2"
+    local worktree_name="$3"
+    local had_conflicts=0
+    local base_dir="${repo_root}/.git/worktrees/${worktree_name}/agent_base"
+
+    while IFS= read -r wt_file; do
+        [[ -z "$wt_file" ]] && continue
+        local rel_path="${wt_file#"$worktree_path"/}"
+        local repo_file="${repo_root}/${rel_path}"
+        local base_file="${base_dir}/${rel_path}"
+
+        if [[ ! -f "$repo_file" ]]; then
+            echo "Copying new file to main repo: $rel_path"
+            mkdir -p "$(dirname "$repo_file")"
+            cp "$wt_file" "$repo_file"
+        elif ! diff -q "$wt_file" "$repo_file" >/dev/null 2>&1; then
+            echo "Merging: $rel_path"
+            local merged
+            merged=$(mktemp)
+            trap 'rm -f "$merged"' RETURN
+
+            if [[ -f "$base_file" ]]; then
+                cp "$repo_file" "$merged"
+                if ! git merge-file "$merged" "$base_file" "$wt_file" 2>/dev/null; then
+                    echo "Conflict in $rel_path - opening editor to resolve..."
+                    "${EDITOR:-vim}" "$merged"
+                    if grep -q "^<<<<<<<" "$merged"; then
+                        echo "Error: unresolved conflicts in $rel_path" >&2
+                        had_conflicts=1
+                        continue
+                    fi
+                fi
+            else
+                echo "Warning: no base snapshot for $rel_path, using worktree version" >&2
+                cp "$wt_file" "$merged"
+            fi
+
+            cp "$merged" "$repo_file"
+            echo "Merged: $rel_path"
+        fi
+    done < <(find_agent_files "$worktree_path")
+
+    return $had_conflicts
+}
+
+# ─── Worktree commands ───────────────────────────────────────────────────────
+
+cmd_add() {
+    local branch="${1:-}"
+    if [[ -z "$branch" ]]; then
+        echo "Error: branch name required" >&2
+        usage
+    fi
+    branch=$(normalize_branch "$branch")
+
+    local repo_root
+    repo_root=$(get_repo_root)
+    local worktree_path
+    worktree_path=$(get_worktree_path "$repo_root" "$branch")
+
+    if [[ -d "$worktree_path" ]]; then
+        echo "Error: worktree already exists at $worktree_path" >&2
+        exit 1
+    fi
+
+    if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$branch"; then
+        git -C "$repo_root" worktree add "$worktree_path" "$branch"
+    else
+        git -C "$repo_root" worktree add -b "$branch" "$worktree_path"
+    fi
+
+    local worktree_name
+    worktree_name=$(get_worktree_name "$worktree_path")
+    local starting_commit
+    starting_commit=$(git -C "$worktree_path" rev-parse HEAD)
+    echo "$starting_commit" > "${repo_root}/.git/worktrees/${worktree_name}/starting_commit"
+
+    local source_dir
+    source_dir=$(pwd)
+
+    echo "Running setup in $worktree_path..."
+    (
+        cd "$worktree_path"
+        if [[ -L "${source_dir}/.venv" ]]; then
+            local venv_target
+            venv_target=$(cd "${source_dir}/.venv" && pwd -P)
+            echo "Symlinking .venv -> ${venv_target}"
+            ln -s "${venv_target}" .venv
+        elif [[ -d "${source_dir}/.venv" ]]; then
+            echo "Source has its own venv; creating independent venv..."
+            _create_venv
+        fi
+        if [[ -f "${source_dir}/.env" ]]; then
+            echo "Copying .env from source worktree..."
+            cp "${source_dir}/.env" .env
+        fi
+        if [[ -f ".pre-commit-config.yaml" ]]; then
+            echo "Running pre-commit install..."
+            pre-commit install
+        fi
+    )
+
+    copy_agent_files_to_worktree "$repo_root" "$worktree_path"
+    save_agent_base "$repo_root" "$worktree_name"
+
+    echo ""
+    echo "Worktree created at: $worktree_path"
+    echo "__WT_CD__:${worktree_path}"
+}
+
+_rm_single() {
+    local arg="$1"
+    local repo_root="$2"
+    local force=("${!3}")
+    local force_delete_branch="$4"
+    local worktree_path
+    worktree_path=$(resolve_worktree "$arg" "$repo_root") || return 1
+
+    local worktree_name
+    worktree_name=$(get_worktree_name "$worktree_path")
+    local branch
+    branch=$(find_branch_for_worktree "$repo_root" "$worktree_path")
+    local branch_head
+    branch_head=$(git -C "$worktree_path" rev-parse HEAD)
+    local starting_commit_file="${repo_root}/.git/worktrees/${worktree_name}/starting_commit"
+    local starting_commit=""
+    if [[ -f "$starting_commit_file" ]]; then
+        starting_commit=$(cat "$starting_commit_file")
+    fi
+
+    if ! sync_agent_files "$worktree_path" "$repo_root" "$worktree_name"; then
+        echo "Error: unresolved conflicts in agent files for $arg. Skipping." >&2
+        return 1
+    fi
+
+    local untracked_files
+    untracked_files=$(git -C "$worktree_path" ls-files --others --exclude-standard)
+    if [[ -n "$untracked_files" && ${#force[@]} -eq 0 ]]; then
+        echo "Error: worktree '$arg' has untracked files:" >&2
+        echo "$untracked_files" | head -10 >&2
+        local count
+        count=$(echo "$untracked_files" | wc -l | tr -d ' ')
+        if [[ "$count" -gt 10 ]]; then
+            echo "... and $((count - 10)) more" >&2
+        fi
+        echo "Use --force to remove anyway" >&2
+        return 1
+    fi
+
+    # Check if user is inside the worktree being removed
+    local current_dir
+    current_dir=$(pwd)
+    if [[ "$current_dir" == "$worktree_path" || "$current_dir" == "$worktree_path/"* ]]; then
+        _rm_need_cd=1
+    fi
+
+    git -C "$repo_root" worktree remove "${force[@]}" "$worktree_path"
+    echo "Worktree removed: $worktree_path"
+
+    if [[ -z "$branch" ]]; then
+        echo "Could not determine branch name; branch retained"
+        return 0
+    fi
+
+    if ! git -C "$repo_root" show-ref --verify --quiet "refs/heads/$branch"; then
+        return 0
+    fi
+
+    if [[ -n "$force_delete_branch" ]]; then
+        git -C "$repo_root" branch -D "$branch"
+        echo "Branch deleted: $branch (forced)"
+    elif [[ -z "$starting_commit" ]]; then
+        echo "Branch retained: $branch (no starting commit recorded)"
+    elif [[ "$branch_head" == "$starting_commit" ]]; then
+        git -C "$repo_root" branch -d "$branch"
+        echo "Branch deleted: $branch (no changes from starting commit)"
+    else
+        echo "Branch retained: $branch (has commits beyond starting point)"
+    fi
+}
+
+cmd_rm() {
+    local branches=()
+    local force=()
+    local force_delete_branch=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                usage_rm
+                ;;
+            --force-delete-branch)
+                force_delete_branch="1"
+                force=(-f)
+                shift
+                ;;
+            --force|-f)
+                force=(-f)
+                shift
+                ;;
+            *)
+                branches+=("$1")
+                shift
+                ;;
+        esac
+    done
+
+    if [[ ${#branches[@]} -eq 0 ]]; then
+        echo "Error: branch name or worktree path required" >&2
+        usage_rm 1
+    fi
+
+    local repo_root
+    repo_root=$(get_repo_root)
+    local errors=0
+    _rm_need_cd=0
+
+    for branch in "${branches[@]}"; do
+        if ! _rm_single "$branch" "$repo_root" force[@] "$force_delete_branch"; then
+            ((errors++)) || true
+        fi
+    done
+
+    if [[ $_rm_need_cd -eq 1 ]]; then
+        echo "__WT_CD__:${repo_root}"
+    fi
+
+    return $((errors > 0 ? 1 : 0))
+}
+
+cmd_cd() {
+    local branch="${1:-}"
+    local repo_root
+    repo_root=$(get_repo_root)
+
+    if [[ -z "$branch" ]]; then
+        local main_worktree
+        main_worktree=$(git -C "$repo_root" worktree list --porcelain | awk '
+            /^worktree / { path = substr($0, 10) }
+            /^bare$/ { bare = 1 }
+            /^$/ { if (path && !bare) { print path; exit }; path = ""; bare = 0 }
+            END { if (path && !bare) print path }
+        ')
+
+        local current_dir
+        current_dir=$(pwd)
+
+        if [[ "$current_dir" == "$main_worktree" || "$current_dir" == "$main_worktree/"* ]]; then
+            echo "Already in main repo: $main_worktree"
+        else
+            echo "Switching to main repo: $main_worktree"
+            echo "__WT_CD__:${main_worktree}"
+        fi
+        return
+    fi
+
+    local worktree_path
+    worktree_path=$(resolve_worktree "$branch" "$repo_root") || exit 1
+
+    echo "__WT_CD__:${worktree_path}"
+}
+
+cmd_move() {
+    local new_branch="${1:-}"
+    if [[ -z "$new_branch" ]]; then
+        echo "Error: new branch name required" >&2
+        echo "Usage: wt move <new-branch-name>" >&2
+        exit 1
+    fi
+    new_branch=$(normalize_branch "$new_branch")
+
+    local repo_root
+    repo_root=$(get_repo_root)
+
+    local current_dir
+    current_dir=$(git rev-parse --show-toplevel)
+    if [[ "$current_dir" == "$repo_root" ]]; then
+        echo "Error: must be run from within a worktree, not the main repo" >&2
+        exit 1
+    fi
+
+    local current_branch
+    current_branch=$(git rev-parse --abbrev-ref HEAD)
+    if [[ "$current_branch" == "$new_branch" ]]; then
+        echo "Already on branch '$new_branch', nothing to do"
+        return
+    fi
+
+    local target_worktree
+    target_worktree=$(find_worktree_for_branch "$repo_root" "$new_branch")
+    if [[ -n "$target_worktree" ]]; then
+        echo "Error: branch '$new_branch' is checked out in worktree: $target_worktree" >&2
+        echo "Remove that worktree first with: wt rm $new_branch" >&2
+        exit 1
+    fi
+
+    if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$new_branch"; then
+        if git merge-base --is-ancestor "refs/heads/$new_branch" HEAD; then
+            echo "Branch '$new_branch' is an ancestor of HEAD; replacing it"
+            git -C "$repo_root" branch -D "$new_branch"
+        else
+            echo "Error: branch '$new_branch' already exists and is not an ancestor of HEAD" >&2
+            echo "Delete it first with: git branch -D $new_branch" >&2
+            exit 1
+        fi
+    fi
+
+    local new_worktree_path
+    new_worktree_path=$(get_worktree_path "$repo_root" "$new_branch")
+
+    if [[ -e "$new_worktree_path" ]]; then
+        echo "Error: path already exists: $new_worktree_path" >&2
+        exit 1
+    fi
+
+    git branch -m "$current_branch" "$new_branch"
+    echo "Branch renamed: $current_branch -> $new_branch"
+
+    git -C "$repo_root" worktree move "$current_dir" "$new_worktree_path"
+    echo "Worktree moved to: $new_worktree_path"
+
+    echo "__WT_CD__:${new_worktree_path}"
+}
+
+cmd_list() {
+    local repo_root
+    repo_root=$(get_repo_root)
+    git -C "$repo_root" worktree list
+}
+
+cmd_base() {
+    local arg="${1:-}"
+    local repo_root
+    repo_root=$(get_repo_root)
+    local worktree_path
+
+    if [[ -z "$arg" ]]; then
+        worktree_path=$(git rev-parse --show-toplevel)
+    else
+        worktree_path=$(resolve_worktree "$arg" "$repo_root") || exit 1
+    fi
+
+    if [[ "$worktree_path" == "$repo_root" ]]; then
+        echo "Error: main repo has no starting commit" >&2
+        exit 1
+    fi
+
+    local worktree_name
+    worktree_name=$(get_worktree_name "$worktree_path")
+    local starting_commit_file="${repo_root}/.git/worktrees/${worktree_name}/starting_commit"
+
+    if [[ ! -f "$starting_commit_file" ]]; then
+        echo "Error: no starting commit recorded for this worktree" >&2
+        echo "  (worktree may have been created before this feature was added)" >&2
+        exit 1
+    fi
+
+    cat "$starting_commit_file"
+}
+
+cmd_sync_agent() {
+    local arg="${1:-}"
+    local repo_root
+    repo_root=$(get_repo_root)
+    local worktree_path
+
+    if [[ -z "$arg" ]]; then
+        local current_dir
+        current_dir=$(pwd)
+        if [[ "$current_dir" == "$repo_root" ]]; then
+            echo "Error: already in main repo, specify a branch or run from a worktree" >&2
+            exit 1
+        fi
+        worktree_path=$(resolve_worktree "$current_dir" "$repo_root") || exit 1
+    else
+        worktree_path=$(resolve_worktree "$arg" "$repo_root") || exit 1
+    fi
+
+    local worktree_name
+    worktree_name=$(get_worktree_name "$worktree_path")
+
+    if ! sync_agent_files "$worktree_path" "$repo_root" "$worktree_name"; then
+        echo "Error: unresolved conflicts in agent files" >&2
+        exit 1
+    fi
+
+    save_agent_base "$repo_root" "$worktree_name"
+    echo "Agent files synced to main repo"
+}
+
+cmd_copy() {
+    local include_untracked=0
+    local overwrite=0
+    local positionals=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)           usage_copy ;;
+            --include-untracked) include_untracked=1; shift ;;
+            --overwrite)         overwrite=1; shift ;;
+            *)                   positionals+=("$1"); shift ;;
+        esac
+    done
+
+    if [[ ${#positionals[@]} -lt 2 ]]; then
+        echo "Error: branch and at least one path required" >&2
+        usage_copy 1
+    fi
+
+    local repo_root
+    repo_root=$(get_repo_root)
+    local current_worktree
+    current_worktree=$(git rev-parse --show-toplevel)
+
+    # Detect direction: try resolving first and last positional as worktrees
+    local first_arg="${positionals[0]}"
+    local last_arg="${positionals[${#positionals[@]}-1]}"
+    local first_resolved="" last_resolved=""
+
+    first_resolved=$(resolve_worktree "$first_arg" "$repo_root" 2>/dev/null) || true
+    if [[ -n "$first_resolved" && "$first_resolved" == "$current_worktree" ]]; then
+        first_resolved=""
+    fi
+
+    last_resolved=$(resolve_worktree "$last_arg" "$repo_root" 2>/dev/null) || true
+    if [[ -n "$last_resolved" && "$last_resolved" == "$current_worktree" ]]; then
+        last_resolved=""
+    fi
+
+    local source_worktree dest_worktree branch_arg
+    local paths=()
+
+    if [[ -n "$first_resolved" && -n "$last_resolved" ]]; then
+        echo "Error: both '${first_arg}' and '${last_arg}' resolve to worktrees; ambiguous direction" >&2
+        exit 1
+    elif [[ -n "$first_resolved" ]]; then
+        # Pull: branch first → source=other, dest=current
+        source_worktree="$first_resolved"
+        dest_worktree="$current_worktree"
+        branch_arg="$first_arg"
+        paths=("${positionals[@]:1}")
+    elif [[ -n "$last_resolved" ]]; then
+        # Push: branch last → source=current, dest=other
+        source_worktree="$current_worktree"
+        dest_worktree="$last_resolved"
+        branch_arg="$last_arg"
+        paths=("${positionals[@]:0:${#positionals[@]}-1}")
+    else
+        echo "Error: neither '${first_arg}' nor '${last_arg}' resolves to a different worktree" >&2
+        exit 1
+    fi
+
+    if [[ "$source_worktree" == "$dest_worktree" ]]; then
+        echo "Error: source and destination are the same worktree" >&2
+        exit 1
+    fi
+
+    # Expand paths to individual files relative to source worktree root
+    local files=()
+    local missing=()
+    local untracked_errors=()
+
+    for path in "${paths[@]}"; do
+        path="${path%/}"
+        local source_path="$source_worktree/$path"
+        if [[ -d "$source_path" ]]; then
+            if [[ $include_untracked -eq 1 ]]; then
+                while IFS= read -r f; do
+                    [[ -z "$f" ]] && continue
+                    files+=("$f")
+                done < <(git -C "$source_worktree" ls-files --cached --others --exclude-standard -- "$path")
+            else
+                while IFS= read -r f; do
+                    [[ -z "$f" ]] && continue
+                    files+=("$f")
+                done < <(git -C "$source_worktree" ls-files -- "$path")
+            fi
+        elif [[ -f "$source_path" ]]; then
+            if [[ $include_untracked -eq 1 ]]; then
+                files+=("$path")
+            elif git -C "$source_worktree" ls-files --error-unmatch "$path" &>/dev/null; then
+                files+=("$path")
+            else
+                untracked_errors+=("$path")
+            fi
+        else
+            missing+=("$path")
+        fi
+    done
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo "Error: paths not found in source worktree:" >&2
+        for m in "${missing[@]}"; do
+            echo "  $m" >&2
+        done
+        exit 1
+    fi
+
+    if [[ ${#untracked_errors[@]} -gt 0 ]]; then
+        echo "Error: the following files are untracked in source worktree:" >&2
+        for u in "${untracked_errors[@]}"; do
+            echo "  $u" >&2
+        done
+        echo "Use --include-untracked to copy untracked files" >&2
+        exit 1
+    fi
+
+    if [[ ${#files[@]} -eq 0 ]]; then
+        echo "No files to copy"
+        return
+    fi
+
+    # Safety check — batch: 2 git calls instead of 2N
+    local tracked_in_dest
+    tracked_in_dest=$(git -C "$dest_worktree" ls-files -- "${files[@]}")
+
+    local dirty_in_dest
+    dirty_in_dest=$(git -C "$dest_worktree" status --porcelain -- "${files[@]}" | while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        echo "${line:3}"
+    done)
+
+    local errors=()
+    for rel_path in "${files[@]}"; do
+        if echo "$tracked_in_dest" | grep -qxF "$rel_path"; then
+            if echo "$dirty_in_dest" | grep -qxF "$rel_path"; then
+                errors+=("$rel_path (tracked, has uncommitted changes)")
+            fi
+        elif [[ -e "$dest_worktree/$rel_path" ]]; then
+            errors+=("$rel_path (untracked, already exists)")
+        fi
+    done
+
+    if [[ ${#errors[@]} -gt 0 ]]; then
+        if [[ $overwrite -eq 1 ]]; then
+            for e in "${errors[@]}"; do
+                echo "Overwriting: $e"
+            done
+        else
+            echo "Error: the following files would be irrecoverably overwritten:" >&2
+            for e in "${errors[@]}"; do
+                echo "  $e" >&2
+            done
+            echo "Use --overwrite to overwrite conflicting files" >&2
+            exit 1
+        fi
+    fi
+
+    # Copy files — tar pipe: 2 processes instead of 2N (mkdir + cp per file)
+    printf '%s\n' "${files[@]}" \
+        | tar -C "$source_worktree" -cf - -T - \
+        | tar -C "$dest_worktree" -xf -
+
+    printf 'Copied: %s\n' "${files[@]}"
+    echo ""
+    echo "Copied ${#files[@]} file(s) from $branch_arg"
+}
+
+_create_venv() {
+    uv venv
+    uv sync
+}
+
+cmd_venv() {
+    if [[ ! -e ".venv" ]]; then
+        echo "No .venv found in current directory"
+        exit 1
+    fi
+
+    if [[ ! -L ".venv" ]]; then
+        echo ".venv is already a real directory (not a symlink)"
+        exit 0
+    fi
+
+    echo "Removing .venv symlink..."
+    rm .venv
+    unset VIRTUAL_ENV
+    echo "Creating independent venv..."
+    _create_venv
+    echo "Done - .venv is now a real directory"
+    echo "__WT_ACTIVATE__:$(pwd)/.venv"
+}
+
+# ─── Shell integration ───────────────────────────────────────────────────────
+
+detect_shell() {
+    local explicit="${1:-}"
+    if [[ -n "$explicit" ]]; then
+        echo "$explicit"
+    else
+        basename "${SHELL:-bash}"
+    fi
+}
+
+cmd_init() {
+    local shell_name
+    shell_name=$(detect_shell "${1:-}")
+
+    # Core shell integration (bash and zsh)
+    cat <<'EOF'
+# wt - git worktree helper (shell integration)
+# Generated by: eval "$(wt init)"
+
+WT_DIRSTACK=()
+
+_wt_push_dir() {
+    local new_dir="$PWD"
+    local -a new_stack=()
+    for dir in "${WT_DIRSTACK[@]}"; do
+        [[ "$dir" != "$new_dir" ]] && new_stack+=("$dir")
+    done
+    WT_DIRSTACK=("$new_dir" "${new_stack[@]:0:9}")
+}
+
+_wt_stack_get() {
+    local index="$1"
+    if [[ -n "$ZSH_VERSION" ]]; then
+        echo "${WT_DIRSTACK[$index]}"
+    else
+        echo "${WT_DIRSTACK[$((index-1))]}"
+    fi
+}
+
+wt() {
+    if [[ "$1" == "cd" && "${2:-}" == -* ]]; then
+        local arg="$2"
+        local index
+
+        if [[ "$arg" == "-" ]]; then
+            index=1
+        elif [[ "$arg" =~ ^-[0-9]+$ ]]; then
+            index="${arg#-}"
+        fi
+
+        if [[ -n "$index" ]]; then
+            local stack_len=${#WT_DIRSTACK[@]}
+            if [[ $stack_len -eq 0 ]]; then
+                echo "wt: directory stack empty" >&2
+                return 1
+            fi
+            if [[ $index -gt $stack_len || $index -lt 1 ]]; then
+                echo "wt: stack index out of range (have $stack_len entries)" >&2
+                return 1
+            fi
+
+            local target
+            target=$(_wt_stack_get "$index")
+
+            if [[ -d "$target" ]]; then
+                _wt_push_dir
+                cd "$target"
+                echo "$target"
+                return 0
+            else
+                echo "wt: directory no longer exists: $target" >&2
+                return 1
+            fi
+        fi
+    fi
+
+    local output
+    output=$(command wt "$@")
+    local exit_code=$?
+
+    local cd_path=""
+    local activate_path=""
+
+    while IFS= read -r line; do
+        case "$line" in
+            __WT_CD__:*)
+                cd_path="${line#__WT_CD__:}"
+                ;;
+            __WT_ACTIVATE__:*)
+                activate_path="${line#__WT_ACTIVATE__:}"
+                ;;
+            *)
+                echo "$line"
+                ;;
+        esac
+    done <<< "$output"
+
+    if [[ $exit_code -eq 0 ]]; then
+        if [[ -n "$cd_path" && -d "$cd_path" ]]; then
+            _wt_push_dir
+            cd "$cd_path"
+        fi
+
+        if [[ -n "$activate_path" && -d "$activate_path" ]]; then
+            if [[ -n "${VIRTUAL_ENV:-}" ]] && type deactivate &>/dev/null; then
+                deactivate
+            fi
+            source "${activate_path}/bin/activate"
+        fi
+    fi
+
+    return $exit_code
+}
+EOF
+
+    # Zsh completions
+    if [[ "$shell_name" == "zsh" ]]; then
+        cat <<'EOF'
+
+_wt_branches() {
+    local -a branches
+    branches=(${(f)"$(git worktree list 2>/dev/null | awk -F'[][]' 'NF>1 {print $2}')"})
+    _describe 'branch' branches
+}
+
+_wt_git_branches() {
+    local -a branches
+    branches=(${(f)"$(git branch --format='%(refname:short)' 2>/dev/null)"})
+    _describe 'branch' branches
+}
+
+_wt_stack_entries() {
+    local -a completions displays
+    local i=1
+    for dir in "${WT_DIRSTACK[@]}"; do
+        completions+=("-$i")
+        displays+=("$i -- $dir")
+        ((i++))
+    done
+    (( ${#completions} )) && compadd -d displays -a completions
+}
+
+_wt_complete_cd() {
+    if [[ "${words[CURRENT]}" == -* ]]; then
+        _wt_stack_entries
+    else
+        _wt_branches
+    fi
+}
+
+_wt_complete_add() {
+    _wt_git_branches
+}
+
+_wt_complete_rm() {
+    _wt_branches
+}
+
+_wt_complete_remove() {
+    _wt_branches
+}
+
+_wt_complete_base() {
+    _wt_branches
+}
+
+_wt_complete_sync_agent() {
+    _wt_branches
+}
+
+_wt_complete_copy() {
+    local -a wt_branches
+    wt_branches=(${(f)"$(git worktree list 2>/dev/null | awk -F'[][]' 'NF>1 {print $2}')"})
+
+    # Scan already-typed args (positions 3..CURRENT-1) for a branch
+    local branch_found=0
+    local branch_position=0
+    local i
+    for (( i=3; i < CURRENT; i++ )); do
+        if (( ${wt_branches[(Ie)${words[$i]}]} )); then
+            branch_found=1
+            branch_position=$i
+            break
+        fi
+    done
+
+    if (( branch_found )); then
+        if (( branch_position == 3 )); then
+            # Branch was first → pull mode, complete files forever
+            _files
+        fi
+        # else: branch was later → push mode, command is complete, no completions
+    else
+        # No branch yet → offer both branches and files
+        _describe -V 'worktree branch' wt_branches
+        _files
+    fi
+}
+
+_wt_complete_cp() { _wt_complete_copy; }
+
+_wt() {
+    local -a subcmds
+    subcmds=(
+        'add:Create worktree for branch'
+        'rm:Remove worktree and branch'
+        'cd:Change to worktree'
+        'mv:Rename current worktree branch and move directory'
+        'move:Rename current worktree branch and move directory'
+        'list:List worktrees'
+        'ls:List worktrees'
+        'l:List worktrees'
+        'copy:Copy files between worktrees'
+        'cp:Copy files between worktrees'
+        'base:Show the commit a worktree was spawned from'
+        'sync-agent:Sync agent files from worktree to main repo'
+        'venv:Replace symlinked .venv with real one'
+        'help:Show help'
+    )
+
+    if (( CURRENT == 2 )); then
+        _describe 'subcommand' subcmds
+        return
+    fi
+
+    local cmd="${words[2]}"
+    local completer="_wt_complete_${cmd//-/_}"
+    (( $+functions[$completer] )) && $completer
+}
+
+compdef _wt wt
+EOF
+    fi
+}
+
+cmd_version() {
+    echo "wt $WT_VERSION"
+}
+
+cmd_update() {
+    local self
+    self=$(realpath "${BASH_SOURCE[0]}")
+
+    local tmp
+    tmp=$(mktemp)
+
+    echo "Checking for updates..."
+    if command -v curl &>/dev/null; then
+        curl -fsSL "$WT_RAW_URL" -o "$tmp"
+    elif command -v wget &>/dev/null; then
+        wget -qO "$tmp" "$WT_RAW_URL"
+    else
+        echo "Error: curl or wget required" >&2
+        rm -f "$tmp"
+        exit 1
+    fi
+
+    local remote_version
+    remote_version=$(grep -m1 '^WT_VERSION=' "$tmp" | cut -d'"' -f2)
+
+    if [[ -z "$remote_version" ]]; then
+        echo "Error: could not determine remote version" >&2
+        rm -f "$tmp"
+        exit 1
+    fi
+
+    if [[ "$remote_version" == "$WT_VERSION" ]]; then
+        echo "Already up to date ($WT_VERSION)"
+        rm -f "$tmp"
+        return
+    fi
+
+    if ! bash -n "$tmp" 2>/dev/null; then
+        echo "Error: downloaded file has syntax errors, aborting update" >&2
+        rm -f "$tmp"
+        exit 1
+    fi
+
+    chmod +x "$tmp"
+    mv "$tmp" "$self"
+
+    echo "Updated: $WT_VERSION -> $remote_version"
+    echo "Restart your shell to pick up changes to shell integration."
+}
+
+cmd_install() {
+    local shell_name
+    shell_name=$(detect_shell "${1:-}")
+
+    local rc_file
+    case "$shell_name" in
+        zsh)  rc_file="$HOME/.zshrc" ;;
+        bash) rc_file="$HOME/.bashrc" ;;
+        *)
+            echo "Error: unsupported shell '$shell_name'" >&2
+            echo "Manually add to your rc file: eval \"\$(wt init)\"" >&2
+            exit 1
+            ;;
+    esac
+
+    local init_line='eval "$(wt init)"'
+
+    if grep -qF "$init_line" "$rc_file" 2>/dev/null; then
+        echo "Already installed in $rc_file"
+    else
+        printf '\n# wt - git worktree helper\n%s\n' "$init_line" >> "$rc_file"
+        echo "Added to $rc_file:"
+        echo "  $init_line"
+    fi
+
+    echo "Restart your shell or run: source $rc_file"
+}
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+
+if [[ $# -eq 0 ]]; then
+    usage
+fi
+
+command="$1"
+shift
+
+# Universal --help: check before dispatching so every command gets it
+for arg in "$@"; do
+    case "$arg" in
+        -h|--help)
+            case "$command" in
+                rm|remove)    usage_rm ;;
+                copy|cp)      usage_copy ;;
+                *)            usage 0 ;;
+            esac
+            ;;
+    esac
+done
+
+case "$command" in
+    add)          cmd_add "$@" ;;
+    rm|remove)    cmd_rm "$@" ;;
+    cd)           cmd_cd "$@" ;;
+    mv|move)      cmd_move "$@" ;;
+    list|ls|l)    cmd_list ;;
+    copy|cp)      cmd_copy "$@" ;;
+    base)         cmd_base "$@" ;;
+    sync-agent)  cmd_sync_agent "$@" ;;
+    venv)         cmd_venv ;;
+    init)         cmd_init "$@" ;;
+    install)      cmd_install "$@" ;;
+    update)       cmd_update ;;
+    version)      cmd_version ;;
+    -h|--help)      usage 0 ;;
+    help)
+        case "${1:-}" in
+            rm|remove)    usage_rm ;;
+            copy|cp)      usage_copy ;;
+            *)            usage 0 ;;
+        esac
+        ;;
+    *)
+        echo "Error: unknown command '$command'" >&2
+        usage
+        ;;
+esac
