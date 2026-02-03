@@ -6,28 +6,31 @@ _Disclaimer: this readme is auto-generated, but I have reviewed it._
 
 ## Installation
 
-Place the `wt` script somewhere in your `PATH`:
+```sh
+curl -fsSL https://raw.githubusercontent.com/GuyAglionby/wt/main/install.sh | sh
+```
+
+This downloads `wt` to `~/.local/bin`, adds it to your `PATH`, and sets up shell integration (bash or zsh). To install to a different directory:
+
+```sh
+WT_INSTALL_DIR=~/bin curl -fsSL https://raw.githubusercontent.com/GuyAglionby/wt/main/install.sh | sh
+```
+
+Restart your shell after installing.
+
+### Manual installation
+
+Alternatively, copy the script somewhere in your `PATH` and install shell integration yourself:
 
 ```sh
 cp wt ~/.local/bin/wt
 chmod +x ~/.local/bin/wt
-```
-
-Then install shell integration (bash or zsh):
-
-```sh
 wt install
-```
-
-Or manually add to your shell rc file:
-
-```sh
-eval "$(wt init)"
 ```
 
 ## What wt gives you
 
-`wt` makes the branch name the primary handle for everything. You add, remove, navigate, rename, and copy files between worktrees by branch name. Worktrees are placed at `../worktree--{repo}--{branch}` relative to the main worktree, but you rarely need to think about paths at all.
+`wt` makes the branch name the primary handle for everything. Raw `git worktree` commands operate on directory paths -- you construct paths by hand, remember where each worktree lives, and clean up branches yourself. `wt` removes that bookkeeping. You add, remove, navigate, rename, and copy files between worktrees by branch name. Worktrees are placed at `../worktree--{repo}--{branch}` relative to the main worktree, but you rarely need to think about paths at all.
 
 **Branch-first navigation.** `wt cd feature-x` moves your shell into the worktree for that branch. `wt cd` takes you back to the main worktree. `wt cd -` returns to wherever you just were.
 
@@ -159,8 +162,4 @@ Print the current version.
 
 If you've worked on more than one branch in a repository, you've run into the friction of `git checkout`: stash your work, switch branches, wait for your editor to catch up, switch back, pop the stash. If you need two branches open at the same time -- reviewing one while working on another, running tests on a feature branch while fixing something on main -- you're stuck.
 
-Git worktrees let you check out multiple branches into separate directories simultaneously. Each worktree is a full working copy backed by a single shared `.git` object store. No cloning, no duplicated history, no stashing. Every branch you need is live and editable at the same time.
-
-The trade-off is that raw `git worktree` commands operate on directory paths. You construct paths by hand, remember where each worktree lives, and clean up branches yourself. For occasional use this is fine. Once worktrees become part of your daily workflow -- and they should, particularly if you work with AI coding agents that benefit from isolated working directories -- the bookkeeping adds up.
-
-`wt` removes that bookkeeping. Worktree directories are derived from branch names automatically. Navigation, creation, deletion, file transfer, and environment setup all operate on branch names. The directory structure becomes an implementation detail rather than something you manage.
+Git worktrees let you check out multiple branches into separate directories simultaneously. Each worktree is a full working copy backed by a single shared `.git` object store. No cloning, no duplicated history, no stashing. Every branch you need is live and editable at the same time. This is particularly valuable when working with AI coding agents, which benefit from isolated working directories where they can make changes without interfering with your other work.
