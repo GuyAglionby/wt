@@ -12,7 +12,7 @@ set -euo pipefail
 # Manual setup (alternative to wt install):
 #   Add to your .bashrc/.zshrc: eval "$(wt init)"
 
-WT_VERSION="0.1.0"
+WT_VERSION="0.1.1"
 WT_RAW_URL="https://raw.githubusercontent.com/GuyAglionby/wt/main/wt"
 
 # ─── Usage ────────────────────────────────────────────────────────────────────
@@ -341,7 +341,7 @@ cmd_add() {
 _rm_single() {
     local arg="$1"
     local repo_root="$2"
-    local force=("${!3}")
+    local force_flag="$3"
     local force_delete_branch="$4"
     local worktree_path
     worktree_path=$(resolve_worktree "$arg" "$repo_root") || return 1
@@ -365,7 +365,7 @@ _rm_single() {
 
     local untracked_files
     untracked_files=$(git -C "$worktree_path" ls-files --others --exclude-standard)
-    if [[ -n "$untracked_files" && ${#force[@]} -eq 0 ]]; then
+    if [[ -n "$untracked_files" && -z "$force_flag" ]]; then
         echo "Error: worktree '$arg' has untracked files:" >&2
         echo "$untracked_files" | head -10 >&2
         local count
@@ -384,7 +384,7 @@ _rm_single() {
         _rm_need_cd=1
     fi
 
-    git -C "$repo_root" worktree remove "${force[@]}" "$worktree_path"
+    git -C "$repo_root" worktree remove ${force_flag:+"$force_flag"} "$worktree_path"
     echo "Worktree removed: $worktree_path"
 
     if [[ -z "$branch" ]]; then
@@ -411,7 +411,7 @@ _rm_single() {
 
 cmd_rm() {
     local branches=()
-    local force=()
+    local force_flag=""
     local force_delete_branch=""
 
     while [[ $# -gt 0 ]]; do
@@ -421,11 +421,11 @@ cmd_rm() {
                 ;;
             --force-delete-branch)
                 force_delete_branch="1"
-                force=(-f)
+                force_flag="-f"
                 shift
                 ;;
             --force|-f)
-                force=(-f)
+                force_flag="-f"
                 shift
                 ;;
             *)
@@ -446,7 +446,7 @@ cmd_rm() {
     _rm_need_cd=0
 
     for branch in "${branches[@]}"; do
-        if ! _rm_single "$branch" "$repo_root" force[@] "$force_delete_branch"; then
+        if ! _rm_single "$branch" "$repo_root" "$force_flag" "$force_delete_branch"; then
             ((errors++)) || true
         fi
     done
