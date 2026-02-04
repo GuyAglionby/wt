@@ -52,7 +52,13 @@ For set-membership lookups, store newline-delimited strings and use `grep -qxF`.
 
 Worktrees depend on the main repo, never on each other. The main worktree outlives all linked worktrees, so sharing its resources (venv, .env) is safe. A worktree's own resources are ephemeral — other worktrees must not reference them.
 
-`_create_venv()` is the single entry point for creating a standalone venv. Both `cmd_add` (when the source has its own venv) and `cmd_venv` use it. Future package manager support (poetry) should be added here.
+`cmd_add` always symlinks `.venv` to the main worktree's venv — it never creates an independent venv. If run from a linked worktree whose `.venv` is a real directory, it falls back to main's venv instead.
+
+`_create_venv()` is the single entry point for creating a standalone venv. `cmd_venv` uses it. Future package manager support (poetry) should be added here.
+
+## Versioning
+
+We use semver. When making changes, update the version in `WT_VERSION` in `wt` and add an entry to `CHANGELOG.md`.
 
 ## Command naming
 

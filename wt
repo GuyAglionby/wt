@@ -12,7 +12,7 @@ set -euo pipefail
 # Manual setup (alternative to wt install):
 #   Add to your .bashrc/.zshrc: eval "$(wt init)"
 
-WT_VERSION="0.1.1"
+WT_VERSION="0.1.2"
 WT_RAW_URL="https://raw.githubusercontent.com/GuyAglionby/wt/main/wt"
 
 # ─── Usage ────────────────────────────────────────────────────────────────────
@@ -192,7 +192,7 @@ find_agent_files() {
         fi
     done
 
-    find "$dir" \( "${find_args[@]}" \) -type f 2>/dev/null
+    find "$dir" -name .git -prune -o \( "${find_args[@]}" \) -type f -print 2>/dev/null
 }
 
 copy_agent_files_to_worktree() {
@@ -311,14 +311,23 @@ cmd_add() {
     echo "Running setup in $worktree_path..."
     (
         cd "$worktree_path"
+        local venv_target=""
         if [[ -L "${source_dir}/.venv" ]]; then
-            local venv_target
             venv_target=$(cd "${source_dir}/.venv" && pwd -P)
+        elif [[ -d "${source_dir}/.venv" ]]; then
+            if [[ "${source_dir}" == "${repo_root}" ]]; then
+                # Source is main worktree — safe to depend on its venv
+                venv_target="${source_dir}/.venv"
+            elif [[ -L "${repo_root}/.venv" ]]; then
+                # Source is a linked worktree — fall back to main's venv
+                venv_target=$(cd "${repo_root}/.venv" && pwd -P)
+            elif [[ -d "${repo_root}/.venv" ]]; then
+                venv_target="${repo_root}/.venv"
+            fi
+        fi
+        if [[ -n "$venv_target" ]]; then
             echo "Symlinking .venv -> ${venv_target}"
             ln -s "${venv_target}" .venv
-        elif [[ -d "${source_dir}/.venv" ]]; then
-            echo "Source has its own venv; creating independent venv..."
-            _create_venv
         fi
         if [[ -f "${source_dir}/.env" ]]; then
             echo "Copying .env from source worktree..."
@@ -468,7 +477,7 @@ cmd_cd() {
         main_worktree=$(git -C "$repo_root" worktree list --porcelain | awk '
             /^worktree / { path = substr($0, 10) }
             /^bare$/ { bare = 1 }
-            /^$/ { if (path && !bare) { print path; exit }; path = ""; bare = 0 }
+            /^$/ { if (path && !bare) { print path; path = ""; exit }; path = ""; bare = 0 }
             END { if (path && !bare) print path }
         ')
 
