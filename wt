@@ -12,7 +12,7 @@ set -euo pipefail
 # Manual setup (alternative to wt install):
 #   Add to your .bashrc/.zshrc: eval "$(wt init)"
 
-WT_VERSION="0.1.2"
+WT_VERSION="0.1.3"
 WT_RAW_URL="https://raw.githubusercontent.com/GuyAglionby/wt/main/wt"
 
 # ─── Usage ────────────────────────────────────────────────────────────────────
@@ -393,7 +393,9 @@ _rm_single() {
         _rm_need_cd=1
     fi
 
-    git -C "$repo_root" worktree remove ${force_flag:+"$force_flag"} "$worktree_path"
+    if ! git -C "$repo_root" worktree remove ${force_flag:+"$force_flag"} "$worktree_path"; then
+        return 1
+    fi
     echo "Worktree removed: $worktree_path"
 
     if [[ -z "$branch" ]]; then

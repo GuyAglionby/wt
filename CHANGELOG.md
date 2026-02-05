@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3
+
+### Fixed
+
+- `wt rm` printed "Worktree removed" even when `git worktree remove` failed (e.g., due to modified/untracked files without `--force`). The misleading success message appeared because `_rm_single` runs inside `if ! ...` which disables `set -e`.
+
 ## 0.1.2
 
 ### Fixed
