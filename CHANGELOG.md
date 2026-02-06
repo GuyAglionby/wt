@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.5
+
+### Fixed
+
+- `wt venv` failed with "Missing credentials" when run from a shell with an activated venv. The command unset `VIRTUAL_ENV` but left the old venv's bin directory in `PATH`, causing `uv sync` to find a stale keyring/credential helper. Now strips the venv's bin from `PATH` too, mirroring what `deactivate` does.
+
+## 0.1.4
+
+### Fixed
+
+- `wt rm` showed "unbound variable" error for `merged` when syncing agent files. The `sync_agent_files` function used a RETURN trap to clean up a temp file, but bash's variable scoping with RETURN traps is unreliable. Now cleans up the temp file immediately after use.
+
 ## 0.1.3
 
 ### Fixed

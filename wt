@@ -12,7 +12,7 @@ set -euo pipefail
 # Manual setup (alternative to wt install):
 #   Add to your .bashrc/.zshrc: eval "$(wt init)"
 
-WT_VERSION="0.1.3"
+WT_VERSION="0.1.5"
 WT_RAW_URL="https://raw.githubusercontent.com/GuyAglionby/wt/main/wt"
 
 # ─── Usage ────────────────────────────────────────────────────────────────────
@@ -247,7 +247,6 @@ sync_agent_files() {
             echo "Merging: $rel_path"
             local merged
             merged=$(mktemp)
-            trap 'rm -f "$merged"' RETURN
 
             if [[ -f "$base_file" ]]; then
                 cp "$repo_file" "$merged"
@@ -256,6 +255,7 @@ sync_agent_files() {
                     "${EDITOR:-vim}" "$merged"
                     if grep -q "^<<<<<<<" "$merged"; then
                         echo "Error: unresolved conflicts in $rel_path" >&2
+                        rm -f "$merged"
                         had_conflicts=1
                         continue
                     fi
@@ -266,6 +266,7 @@ sync_agent_files() {
             fi
 
             cp "$merged" "$repo_file"
+            rm -f "$merged"
             echo "Merged: $rel_path"
         fi
     done < <(find_agent_files "$worktree_path")
@@ -813,10 +814,20 @@ cmd_venv() {
         exit 0
     fi
 
-    echo "Removing .venv symlink..."
     rm .venv
-    unset VIRTUAL_ENV
-    echo "Creating independent venv..."
+    if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+        local venv_bin="${VIRTUAL_ENV}/bin"
+        local new_path="" p
+        local saved_ifs="${IFS}"
+        IFS=':'
+        for p in $PATH; do
+            [[ "$p" == "$venv_bin" ]] && continue
+            new_path="${new_path:+${new_path}:}${p}"
+        done
+        IFS="${saved_ifs}"
+        PATH="${new_path}"
+        unset VIRTUAL_ENV
+    fi
     _create_venv
     echo "Done - .venv is now a real directory"
     echo "__WT_ACTIVATE__:$(pwd)/.venv"
