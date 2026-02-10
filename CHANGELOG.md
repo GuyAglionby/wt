@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.1
+
+### Fixed
+
+- `wt add` created new branches from the main worktree's HEAD instead of the current worktree's HEAD. When running `wt add new-branch` from a linked worktree, the new branch should start from the current worktree's commit, not main's. The `git worktree add -b` command was run with `-C "$repo_root"`, which resolved `HEAD` against the main worktree. Now captures the current HEAD before dispatching to git.
+
+## 0.2.0
+
+### Added
+
+- `wt rm` now detects branches that have been merged into the default branch, even via squash or rebase merge. Previously, the branch deletion heuristic only compared the worktree HEAD to its starting commit — if any commits were made, the branch was always retained, even if the work had already been merged upstream.
+
+  The new logic has two layers:
+  1. **Fast local check**: if the branch HEAD is reachable from the remote default branch (e.g., after a merge commit or fast-forward), the branch is deleted without any API calls.
+  2. **GitHub PR check**: if commit hashes differ (squash/rebase merge), `wt rm` uses `gh` to find a merged PR for the branch and verifies that local HEAD matches or is behind the PR's final commit. Handles the common case where the remote branch has been deleted after merge.
+
+  When `gh` is not installed or the repo is not on GitHub, the existing heuristic is used as a fallback.
+
 ## 0.1.5
 
 ### Fixed

@@ -34,7 +34,20 @@ Per-worktree metadata lives in `.git/worktrees/{worktree_name}/`:
 
 ## Branch deletion heuristic
 
-When removing a worktree (`_rm_single`), the branch is only auto-deleted if its HEAD still equals the recorded `starting_commit` (i.e., no new commits were made). If the branch has diverged, it's retained. This prevents accidental data loss. `--force-delete-branch` overrides the heuristic.
+When removing a worktree (`_rm_single`), the branch deletion decision follows this cascade:
+
+1. `--force-delete-branch` → always delete
+2. No `starting_commit` recorded → retain
+3. HEAD equals `starting_commit` → delete (no work done)
+4. HEAD differs from `starting_commit` → call `_check_branch_merged`:
+   - **Fast local check**: is branch HEAD reachable from `remote/default_branch`? Catches merge commits (hashes preserved) and fast-forwards without any API calls.
+   - **GitHub PR check**: uses `gh` to find a merged PR for the branch. If the PR is merged and local HEAD is at or behind the PR's final commit (`headRefOid`), the branch is safe to delete. Handles squash/rebase merges where commit hashes differ, and handles the common case where the remote branch was deleted after merge.
+   - If `gh` is not installed, or there's no PR, or the PR isn't merged → falls through to the original "retain" behavior.
+
+Helper functions for the merge check:
+- `_get_github_remote(repo_root)` -- resolves the git remote name by matching `gh repo view`'s `nameWithOwner` against `git remote -v` URLs
+- `_get_default_branch(repo_root, remote)` -- resolves the default branch name via `gh`, falling back to `refs/remotes/{remote}/HEAD`, then `"main"`
+- `_check_branch_merged(repo_root, branch, branch_head)` -- orchestrates the merge detection; returns `delete:<reason>` or `retain:<reason>` via stdout
 
 ## Bash compatibility
 

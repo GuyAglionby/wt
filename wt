@@ -12,7 +12,7 @@ set -euo pipefail
 # Manual setup (alternative to wt install):
 #   Add to your .bashrc/.zshrc: eval "$(wt init)"
 
-WT_VERSION="0.1.5"
+WT_VERSION="0.2.1"
 WT_RAW_URL="https://raw.githubusercontent.com/GuyAglionby/wt/main/wt"
 
 # ─── Usage ────────────────────────────────────────────────────────────────────
@@ -155,6 +155,102 @@ resolve_worktree() {
     echo "$worktree_path"
 }
 
+# Resolve the git remote name that corresponds to the GitHub repo.
+# Matches gh's nameWithOwner against git remote URLs (works for SSH and HTTPS).
+_get_github_remote() {
+    local repo_root="$1"
+    local nwo
+    nwo=$(cd "$repo_root" && gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null) || return 1
+    local remote_name
+    remote_name=$(git -C "$repo_root" remote -v | grep -F "$nwo" | head -1 | awk '{print $1}')
+    if [[ -n "$remote_name" ]]; then
+        echo "$remote_name"
+        return 0
+    fi
+    return 1
+}
+
+# Resolve the default branch name (e.g., main, master) for a remote.
+_get_default_branch() {
+    local repo_root="$1"
+    local remote="$2"
+    local default_branch
+    default_branch=$(cd "$repo_root" && gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null)
+    if [[ -n "$default_branch" ]]; then
+        echo "$default_branch"
+        return 0
+    fi
+    default_branch=$(git -C "$repo_root" symbolic-ref "refs/remotes/${remote}/HEAD" 2>/dev/null | sed "s|refs/remotes/${remote}/||")
+    if [[ -n "$default_branch" ]]; then
+        echo "$default_branch"
+        return 0
+    fi
+    echo "main"
+}
+
+# Check if a branch has been merged into the default branch.
+# Prints "delete:<reason>" if the branch can be safely deleted,
+# "retain:<reason>" if it should be kept with a specific reason.
+# Returns 1 with no output if it can't determine the merge status.
+_check_branch_merged() {
+    local repo_root="$1"
+    local branch="$2"
+    local branch_head="$3"
+
+    local remote
+    remote=$(_get_github_remote "$repo_root") || remote="origin"
+
+    local default_branch
+    default_branch=$(_get_default_branch "$repo_root" "$remote")
+
+    # Fetch latest state of default branch and our branch (branch may be deleted on remote)
+    git -C "$repo_root" fetch "$remote" "$default_branch" 2>/dev/null || true
+    git -C "$repo_root" fetch "$remote" "$branch" 2>/dev/null || true
+
+    # Fast local check: is branch HEAD already reachable from remote default branch?
+    # Catches merge commits (original hashes preserved) and fast-forwards.
+    if git -C "$repo_root" merge-base --is-ancestor "$branch_head" "refs/remotes/${remote}/${default_branch}" 2>/dev/null; then
+        echo "delete:commits already in ${default_branch}"
+        return 0
+    fi
+
+    # GitHub PR check (for squash/rebase merges where commit hashes differ)
+    if ! command -v gh &>/dev/null; then
+        return 1
+    fi
+
+    local pr_info
+    pr_info=$(cd "$repo_root" && gh pr list --head "$branch" --state all --limit 1 \
+        --json number,state,headRefOid \
+        --jq '.[] | "\(.number) \(.state) \(.headRefOid)"' 2>/dev/null) || return 1
+
+    if [[ -z "$pr_info" ]]; then
+        return 1
+    fi
+
+    local pr_number pr_state pr_head_oid
+    read -r pr_number pr_state pr_head_oid <<< "$pr_info"
+
+    if [[ "$pr_state" != "MERGED" ]]; then
+        return 1
+    fi
+
+    # PR is merged. Check if local HEAD is at or behind what was merged.
+    if [[ "$branch_head" == "$pr_head_oid" ]]; then
+        echo "delete:PR #${pr_number} merged"
+        return 0
+    fi
+
+    if git -C "$repo_root" merge-base --is-ancestor "$branch_head" "$pr_head_oid" 2>/dev/null; then
+        echo "delete:PR #${pr_number} merged"
+        return 0
+    fi
+
+    # Local has commits beyond what was merged
+    echo "retain:PR #${pr_number} merged but local has additional commits"
+    return 1
+}
+
 # Default agent file patterns. Patterns containing "/" use find -path (where *
 # matches any character including "/", so these handle arbitrary nesting).
 # Patterns without "/" use find -name.
@@ -294,10 +390,13 @@ cmd_add() {
         exit 1
     fi
 
+    local start_point
+    start_point=$(git rev-parse HEAD)
+
     if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$branch"; then
         git -C "$repo_root" worktree add "$worktree_path" "$branch"
     else
-        git -C "$repo_root" worktree add -b "$branch" "$worktree_path"
+        git -C "$repo_root" worktree add -b "$branch" "$worktree_path" "$start_point"
     fi
 
     local worktree_name
@@ -417,7 +516,22 @@ _rm_single() {
         git -C "$repo_root" branch -d "$branch"
         echo "Branch deleted: $branch (no changes from starting commit)"
     else
-        echo "Branch retained: $branch (has commits beyond starting point)"
+        local merge_check
+        merge_check=$(_check_branch_merged "$repo_root" "$branch" "$branch_head") || true
+        case "$merge_check" in
+            delete:*)
+                local reason="${merge_check#delete:}"
+                git -C "$repo_root" branch -D "$branch"
+                echo "Branch deleted: $branch ($reason)"
+                ;;
+            retain:*)
+                local reason="${merge_check#retain:}"
+                echo "Branch retained: $branch ($reason)"
+                ;;
+            *)
+                echo "Branch retained: $branch (has commits beyond starting point)"
+                ;;
+        esac
     fi
 }
 
