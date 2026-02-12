@@ -12,7 +12,7 @@ set -euo pipefail
 # Manual setup (alternative to wt install):
 #   Add to your .bashrc/.zshrc: eval "$(wt init)"
 
-WT_VERSION="0.3.0"
+WT_VERSION="0.3.1"
 WT_RAW_URL="https://raw.githubusercontent.com/GuyAglionby/wt/main/wt"
 
 # ─── Usage ────────────────────────────────────────────────────────────────────
@@ -410,6 +410,69 @@ sync_agent_files() {
     return $had_conflicts
 }
 
+_install_post_rewrite_hook() {
+    local repo_root="$1"
+    local hook_file="${repo_root}/.git/hooks/post-rewrite"
+    local begin_marker="# --- BEGIN WT ---"
+    local end_marker="# --- END WT ---"
+
+    local tmp_body
+    tmp_body=$(mktemp)
+    cat > "$tmp_body" <<'HOOKEOF'
+if [ "$1" = "rebase" ]; then
+    git_dir=$(git rev-parse --git-dir 2>/dev/null)
+    case "$git_dir" in
+        */worktrees/*)
+            starting_commit_file="$git_dir/starting_commit"
+            if [ -f "$starting_commit_file" ]; then
+                old_base=$(cat "$starting_commit_file")
+                read -r _old_sha first_new_sha _rest
+                if [ -n "$first_new_sha" ]; then
+                    if ! git merge-base --is-ancestor "$old_base" HEAD 2>/dev/null; then
+                        new_base=$(git rev-parse "${first_new_sha}^" 2>/dev/null)
+                        if [ -n "$new_base" ]; then
+                            echo "$new_base" > "$starting_commit_file"
+                        fi
+                    fi
+                fi
+            fi
+            ;;
+    esac
+fi
+HOOKEOF
+    local hook_body
+    hook_body=$(cat "$tmp_body")
+    rm -f "$tmp_body"
+
+    local wt_section
+    wt_section=$(printf '%s\n%s\n%s' "$begin_marker" "$hook_body" "$end_marker")
+
+    if [[ ! -f "$hook_file" ]]; then
+        mkdir -p "$(dirname "$hook_file")"
+        printf '#!/usr/bin/env bash\n%s\n' "$wt_section" > "$hook_file"
+    elif ! grep -qF "$begin_marker" "$hook_file"; then
+        printf '\n%s\n' "$wt_section" >> "$hook_file"
+    else
+        # Replace existing wt section (pure bash for macOS awk compat)
+        local tmp
+        tmp=$(mktemp)
+        local in_section=0
+        while IFS= read -r line; do
+            if [[ "$line" == "$begin_marker" ]]; then
+                printf '%s\n' "$wt_section"
+                in_section=1
+            elif [[ "$line" == "$end_marker" ]]; then
+                in_section=0
+            elif [[ $in_section -eq 0 ]]; then
+                printf '%s\n' "$line"
+            fi
+        done < "$hook_file" > "$tmp"
+        mv "$tmp" "$hook_file"
+    fi
+
+    chmod +x "$hook_file"
+}
+
 # ─── Worktree commands ───────────────────────────────────────────────────────
 
 cmd_add() {
@@ -444,6 +507,7 @@ cmd_add() {
     local starting_commit
     starting_commit=$(git -C "$worktree_path" rev-parse HEAD)
     echo "$starting_commit" > "${repo_root}/.git/worktrees/${worktree_name}/starting_commit"
+    _install_post_rewrite_hook "$repo_root"
 
     local source_dir
     source_dir=$(pwd)

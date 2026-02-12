@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1
+
+### Fixed
+
+- `wt base` returned a stale commit after `git rebase`. The `starting_commit` recorded at worktree creation time became unreachable when a rebase rewrote the branch's history, making `wt base` misleading and causing the "no work done" branch deletion shortcut to fail. Now installs a `post-rewrite` git hook (via `wt add`) that automatically updates `starting_commit` when a rebase changes the branch's base. The hook is idempotent and coexists with existing `post-rewrite` hooks.
+
 ## 0.3.0
 
 ### Added
