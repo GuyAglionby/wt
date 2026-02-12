@@ -2,6 +2,10 @@
 
 Single-file bash tool (`wt`) for managing git worktrees.
 
+# Testing instructions
+
+After making any changes to `wt`, you should add the relevant tests. Tests in this repository are handled by `bats`. Before committing, verify all tests pass with `bats test/`. 
+
 ## Worktree resolution helpers
 
 All worktree/branch lookups must go through the existing helper functions. Never reimplement this logic inline.
@@ -77,3 +81,4 @@ We use semver. When making changes, update the version in `WT_VERSION` in `wt` a
 
 - User-facing commands: `cmd_<name>()`
 - Internal helpers: `_<name>()`
+

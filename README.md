@@ -152,6 +152,16 @@ Print the current version.
 
 </details>
 
+## Testing
+
+Tests use [bats-core](https://github.com/bats-core/bats-core). See the [installation instructions](https://bats-core.readthedocs.io/en/stable/installation.html), then run:
+
+```sh
+bats test/
+```
+
+Each test runs in an isolated temporary git repo, so nothing touches your real repositories.
+
 ## To do
 
 - **Poetry support.** Environment management currently assumes uv. Poetry projects need equivalent `wt venv` support.
