@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0
+
+### Added
+
+- `wt cleanup` command that scans all linked worktrees and removes those whose branches have been merged or have no changes from their starting commit. Skips worktrees with untracked files, detached HEADs, or unmerged commits. Supports `--dry-run` to preview what would happen without making changes.
+- `wt sync-agent --dry-run` flag to preview what agent file syncing would do without making changes. Shows which files would be copied, merged cleanly, conflict, or overwritten.
+
+### Changed
+
+- Extracted `_decide_branch_deletion` and `_check_untracked_files` helpers from `_rm_single` so `wt cleanup` and `wt rm` share the same decision logic.
+
 ## 0.2.1
 
 ### Fixed

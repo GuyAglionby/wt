@@ -12,7 +12,7 @@ set -euo pipefail
 # Manual setup (alternative to wt install):
 #   Add to your .bashrc/.zshrc: eval "$(wt init)"
 
-WT_VERSION="0.2.1"
+WT_VERSION="0.3.0"
 WT_RAW_URL="https://raw.githubusercontent.com/GuyAglionby/wt/main/wt"
 
 # ─── Usage ────────────────────────────────────────────────────────────────────
@@ -26,13 +26,14 @@ Usage: wt <command> [args]
 Commands:
   add <branch>              Create worktree at ../worktree--{repo}--{branch}
   rm <branch>... [options]  Remove worktree(s) and branch (if unchanged)
+  cleanup [--dry-run]       Remove worktrees with merged/unchanged branches
   cd [branch]               Change to worktree for branch, or main repo if no arg
   mv <new-branch>           Rename current worktree's branch and move directory
   list                      List worktrees
   copy <branch> <path>...   Copy files from another worktree
   copy <path>... <branch>   Copy files to another worktree
   base [branch]             Show the commit a worktree was spawned from
-  sync-agent [branch]      Sync agent files from worktree to main repo
+  sync-agent [branch]       Sync agent files from worktree to main repo
   venv                      Replace symlinked .venv with a real one (uv sync)
   init [bash|zsh]           Output shell integration for eval
   install                   Add shell integration to your rc file
@@ -68,6 +69,23 @@ Usage: wt copy <branch> <path>...   (pull from another worktree)
 Options:
   --include-untracked       Include untracked files (default: tracked only)
   --overwrite               Overwrite conflicting files instead of failing
+  -h, --help                Show this help
+EOF
+    exit "${1:-0}"
+}
+
+usage_cleanup() {
+    cat <<EOF
+wt cleanup - remove worktrees with merged or unchanged branches
+
+Usage: wt cleanup [--dry-run] [-h|--help]
+
+Scans all linked worktrees and removes those whose branches have been merged
+or have no changes from their starting commit. Skips worktrees with untracked
+files, detached HEADs, or unmerged commits.
+
+Options:
+  --dry-run                 Show what would be removed without making changes
   -h, --help                Show this help
 EOF
     exit "${1:-0}"
@@ -326,6 +344,7 @@ sync_agent_files() {
     local worktree_path="$1"
     local repo_root="$2"
     local worktree_name="$3"
+    local dry_run="${4:-}"
     local had_conflicts=0
     local base_dir="${repo_root}/.git/worktrees/${worktree_name}/agent_base"
 
@@ -336,34 +355,55 @@ sync_agent_files() {
         local base_file="${base_dir}/${rel_path}"
 
         if [[ ! -f "$repo_file" ]]; then
-            echo "Copying new file to main repo: $rel_path"
-            mkdir -p "$(dirname "$repo_file")"
-            cp "$wt_file" "$repo_file"
+            if [[ -n "$dry_run" ]]; then
+                echo "Would copy new file to main repo: $rel_path"
+            else
+                echo "Copying new file to main repo: $rel_path"
+                mkdir -p "$(dirname "$repo_file")"
+                cp "$wt_file" "$repo_file"
+            fi
         elif ! diff -q "$wt_file" "$repo_file" >/dev/null 2>&1; then
-            echo "Merging: $rel_path"
-            local merged
-            merged=$(mktemp)
-
-            if [[ -f "$base_file" ]]; then
-                cp "$repo_file" "$merged"
-                if ! git merge-file "$merged" "$base_file" "$wt_file" 2>/dev/null; then
-                    echo "Conflict in $rel_path - opening editor to resolve..."
-                    "${EDITOR:-vim}" "$merged"
-                    if grep -q "^<<<<<<<" "$merged"; then
-                        echo "Error: unresolved conflicts in $rel_path" >&2
-                        rm -f "$merged"
+            if [[ -n "$dry_run" ]]; then
+                if [[ -f "$base_file" ]]; then
+                    local merged
+                    merged=$(mktemp)
+                    cp "$repo_file" "$merged"
+                    if git merge-file "$merged" "$base_file" "$wt_file" 2>/dev/null; then
+                        echo "Would merge cleanly: $rel_path"
+                    else
+                        echo "Would conflict: $rel_path"
                         had_conflicts=1
-                        continue
                     fi
+                    rm -f "$merged"
+                else
+                    echo "Would overwrite (no base snapshot): $rel_path"
                 fi
             else
-                echo "Warning: no base snapshot for $rel_path, using worktree version" >&2
-                cp "$wt_file" "$merged"
-            fi
+                echo "Merging: $rel_path"
+                local merged
+                merged=$(mktemp)
 
-            cp "$merged" "$repo_file"
-            rm -f "$merged"
-            echo "Merged: $rel_path"
+                if [[ -f "$base_file" ]]; then
+                    cp "$repo_file" "$merged"
+                    if ! git merge-file "$merged" "$base_file" "$wt_file" 2>/dev/null; then
+                        echo "Conflict in $rel_path - opening editor to resolve..."
+                        "${EDITOR:-vim}" "$merged"
+                        if grep -q "^<<<<<<<" "$merged"; then
+                            echo "Error: unresolved conflicts in $rel_path" >&2
+                            rm -f "$merged"
+                            had_conflicts=1
+                            continue
+                        fi
+                    fi
+                else
+                    echo "Warning: no base snapshot for $rel_path, using worktree version" >&2
+                    cp "$wt_file" "$merged"
+                fi
+
+                cp "$merged" "$repo_file"
+                rm -f "$merged"
+                echo "Merged: $rel_path"
+            fi
         fi
     done < <(find_agent_files "$worktree_path")
 
@@ -447,6 +487,45 @@ cmd_add() {
     echo "__WT_CD__:${worktree_path}"
 }
 
+_check_untracked_files() {
+    local worktree_path="$1"
+    git -C "$worktree_path" ls-files --others --exclude-standard
+}
+
+_decide_branch_deletion() {
+    local repo_root="$1"
+    local branch="$2"
+    local branch_head="$3"
+    local starting_commit="$4"
+
+    if [[ -z "$starting_commit" ]]; then
+        echo "retain:no starting commit recorded"
+        return 1
+    fi
+
+    if [[ "$branch_head" == "$starting_commit" ]]; then
+        echo "delete:no changes from starting commit"
+        return 0
+    fi
+
+    local merge_check
+    merge_check=$(_check_branch_merged "$repo_root" "$branch" "$branch_head") || true
+    case "$merge_check" in
+        delete:*)
+            echo "$merge_check"
+            return 0
+            ;;
+        retain:*)
+            echo "$merge_check"
+            return 1
+            ;;
+        *)
+            echo "retain:has commits beyond starting point"
+            return 1
+            ;;
+    esac
+}
+
 _rm_single() {
     local arg="$1"
     local repo_root="$2"
@@ -458,7 +537,7 @@ _rm_single() {
     local worktree_name
     worktree_name=$(get_worktree_name "$worktree_path")
     local branch
-    branch=$(find_branch_for_worktree "$repo_root" "$worktree_path")
+    branch=$(find_branch_for_worktree "$repo_root" "$worktree_path") || true
     local branch_head
     branch_head=$(git -C "$worktree_path" rev-parse HEAD)
     local starting_commit_file="${repo_root}/.git/worktrees/${worktree_name}/starting_commit"
@@ -473,7 +552,7 @@ _rm_single() {
     fi
 
     local untracked_files
-    untracked_files=$(git -C "$worktree_path" ls-files --others --exclude-standard)
+    untracked_files=$(_check_untracked_files "$worktree_path")
     if [[ -n "$untracked_files" && -z "$force_flag" ]]; then
         echo "Error: worktree '$arg' has untracked files:" >&2
         echo "$untracked_files" | head -10 >&2
@@ -510,26 +589,18 @@ _rm_single() {
     if [[ -n "$force_delete_branch" ]]; then
         git -C "$repo_root" branch -D "$branch"
         echo "Branch deleted: $branch (forced)"
-    elif [[ -z "$starting_commit" ]]; then
-        echo "Branch retained: $branch (no starting commit recorded)"
-    elif [[ "$branch_head" == "$starting_commit" ]]; then
-        git -C "$repo_root" branch -d "$branch"
-        echo "Branch deleted: $branch (no changes from starting commit)"
     else
-        local merge_check
-        merge_check=$(_check_branch_merged "$repo_root" "$branch" "$branch_head") || true
-        case "$merge_check" in
+        local decision
+        decision=$(_decide_branch_deletion "$repo_root" "$branch" "$branch_head" "$starting_commit") || true
+        case "$decision" in
             delete:*)
-                local reason="${merge_check#delete:}"
+                local reason="${decision#delete:}"
                 git -C "$repo_root" branch -D "$branch"
                 echo "Branch deleted: $branch ($reason)"
                 ;;
             retain:*)
-                local reason="${merge_check#retain:}"
+                local reason="${decision#retain:}"
                 echo "Branch retained: $branch ($reason)"
-                ;;
-            *)
-                echo "Branch retained: $branch (has commits beyond starting point)"
                 ;;
         esac
     fi
@@ -576,6 +647,137 @@ cmd_rm() {
             ((errors++)) || true
         fi
     done
+
+    if [[ $_rm_need_cd -eq 1 ]]; then
+        echo "__WT_CD__:${repo_root}"
+    fi
+
+    return $((errors > 0 ? 1 : 0))
+}
+
+cmd_cleanup() {
+    local dry_run=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                usage_cleanup
+                ;;
+            --dry-run)
+                dry_run=1
+                shift
+                ;;
+            *)
+                echo "Error: unknown option '$1'" >&2
+                usage_cleanup 1
+                ;;
+        esac
+    done
+
+    local repo_root
+    repo_root=$(get_repo_root)
+
+    local removed=0
+    local skipped=0
+    local errors=0
+
+    # Find the main worktree path to skip it
+    local main_worktree
+    main_worktree=$(git -C "$repo_root" worktree list --porcelain | awk '
+        /^worktree / { path = substr($0, 10) }
+        /^bare$/ { bare = 1 }
+        /^$/ { if (path && !bare) { print path; path = ""; exit }; path = ""; bare = 0 }
+        END { if (path && !bare) print path }
+    ')
+
+    # Collect all linked worktree paths
+    local worktree_paths=()
+    local wt_path=""
+    while IFS= read -r line; do
+        case "$line" in
+            worktree\ *)
+                wt_path="${line#worktree }"
+                ;;
+            "")
+                if [[ -n "$wt_path" && "$wt_path" != "$main_worktree" ]]; then
+                    worktree_paths+=("$wt_path")
+                fi
+                wt_path=""
+                ;;
+        esac
+    done < <(git -C "$repo_root" worktree list --porcelain; echo "")
+
+    if [[ ${#worktree_paths[@]} -eq 0 ]]; then
+        echo "No linked worktrees found"
+        return 0
+    fi
+
+    _rm_need_cd=0
+
+    for wt_path in "${worktree_paths[@]}"; do
+        local branch
+        branch=$(find_branch_for_worktree "$repo_root" "$wt_path") || true
+
+        if [[ -z "$branch" ]]; then
+            echo "Skipping: $wt_path (detached HEAD)"
+            ((skipped++)) || true
+            continue
+        fi
+
+        local untracked
+        untracked=$(_check_untracked_files "$wt_path")
+        if [[ -n "$untracked" ]]; then
+            if [[ -n "$dry_run" ]]; then
+                echo "Would skip: $branch (has untracked files)"
+            fi
+            ((skipped++)) || true
+            continue
+        fi
+
+        local branch_head
+        branch_head=$(git -C "$wt_path" rev-parse HEAD)
+
+        local worktree_name
+        worktree_name=$(get_worktree_name "$wt_path")
+        local starting_commit_file="${repo_root}/.git/worktrees/${worktree_name}/starting_commit"
+        local starting_commit=""
+        if [[ -f "$starting_commit_file" ]]; then
+            starting_commit=$(cat "$starting_commit_file")
+        fi
+
+        local decision
+        decision=$(_decide_branch_deletion "$repo_root" "$branch" "$branch_head" "$starting_commit") || true
+
+        case "$decision" in
+            delete:*)
+                local reason="${decision#delete:}"
+                if [[ -n "$dry_run" ]]; then
+                    echo "Would remove: $branch ($reason)"
+                    ((removed++)) || true
+                else
+                    if _rm_single "$branch" "$repo_root" "" "1"; then
+                        ((removed++)) || true
+                    else
+                        ((errors++)) || true
+                    fi
+                fi
+                ;;
+            retain:*)
+                local reason="${decision#retain:}"
+                if [[ -n "$dry_run" ]]; then
+                    echo "Would skip: $branch ($reason)"
+                fi
+                ((skipped++)) || true
+                ;;
+        esac
+    done
+
+    echo ""
+    if [[ -n "$dry_run" ]]; then
+        echo "Dry run: $removed would be removed, $skipped would be skipped"
+    else
+        echo "Cleanup: $removed removed, $skipped skipped, $errors error(s)"
+    fi
 
     if [[ $_rm_need_cd -eq 1 ]]; then
         echo "__WT_CD__:${repo_root}"
@@ -714,8 +916,42 @@ cmd_base() {
     cat "$starting_commit_file"
 }
 
+usage_sync_agent() {
+    cat <<EOF
+wt sync-agent - sync agent files from worktree to main repo
+
+Usage: wt sync-agent [branch] [--dry-run] [-h|--help]
+
+Merges agent files (CLAUDE.md, AGENTS.md, etc.) from a worktree back into the
+main repo using three-way merge. Updates the base snapshot after syncing.
+
+Options:
+  --dry-run                 Show what would be synced without making changes
+  -h, --help                Show this help
+EOF
+    exit "${1:-0}"
+}
+
 cmd_sync_agent() {
-    local arg="${1:-}"
+    local arg=""
+    local dry_run=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                usage_sync_agent
+                ;;
+            --dry-run)
+                dry_run=1
+                shift
+                ;;
+            *)
+                arg="$1"
+                shift
+                ;;
+        esac
+    done
+
     local repo_root
     repo_root=$(get_repo_root)
     local worktree_path
@@ -735,13 +971,22 @@ cmd_sync_agent() {
     local worktree_name
     worktree_name=$(get_worktree_name "$worktree_path")
 
-    if ! sync_agent_files "$worktree_path" "$repo_root" "$worktree_name"; then
-        echo "Error: unresolved conflicts in agent files" >&2
-        exit 1
+    if ! sync_agent_files "$worktree_path" "$repo_root" "$worktree_name" "$dry_run"; then
+        if [[ -n "$dry_run" ]]; then
+            echo "Dry run: some files would have conflicts"
+        else
+            echo "Error: unresolved conflicts in agent files" >&2
+            exit 1
+        fi
+        return
     fi
 
-    save_agent_base "$repo_root" "$worktree_name"
-    echo "Agent files synced to main repo"
+    if [[ -n "$dry_run" ]]; then
+        echo "Dry run: no conflicts detected"
+    else
+        save_agent_base "$repo_root" "$worktree_name"
+        echo "Agent files synced to main repo"
+    fi
 }
 
 cmd_copy() {
@@ -1154,6 +1399,7 @@ _wt() {
     subcmds=(
         'add:Create worktree for branch'
         'rm:Remove worktree and branch'
+        'cleanup:Remove worktrees with merged/unchanged branches'
         'cd:Change to worktree'
         'mv:Rename current worktree branch and move directory'
         'move:Rename current worktree branch and move directory'
@@ -1275,9 +1521,11 @@ for arg in "$@"; do
     case "$arg" in
         -h|--help)
             case "$command" in
-                rm|remove)    usage_rm ;;
-                copy|cp)      usage_copy ;;
-                *)            usage 0 ;;
+                rm|remove)     usage_rm ;;
+                cleanup)       usage_cleanup ;;
+                copy|cp)       usage_copy ;;
+                sync-agent)   usage_sync_agent ;;
+                *)             usage 0 ;;
             esac
             ;;
     esac
@@ -1286,6 +1534,7 @@ done
 case "$command" in
     add)          cmd_add "$@" ;;
     rm|remove)    cmd_rm "$@" ;;
+    cleanup)      cmd_cleanup "$@" ;;
     cd)           cmd_cd "$@" ;;
     mv|move)      cmd_move "$@" ;;
     list|ls|l)    cmd_list ;;
@@ -1300,9 +1549,11 @@ case "$command" in
     -h|--help)      usage 0 ;;
     help)
         case "${1:-}" in
-            rm|remove)    usage_rm ;;
-            copy|cp)      usage_copy ;;
-            *)            usage 0 ;;
+            rm|remove)     usage_rm ;;
+            cleanup)       usage_cleanup ;;
+            copy|cp)       usage_copy ;;
+            sync-agent)   usage_sync_agent ;;
+            *)             usage 0 ;;
         esac
         ;;
     *)
