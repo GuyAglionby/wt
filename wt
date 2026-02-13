@@ -12,7 +12,7 @@ set -euo pipefail
 # Manual setup (alternative to wt install):
 #   Add to your .bashrc/.zshrc: eval "$(wt init)"
 
-WT_VERSION="0.3.1"
+WT_VERSION="0.3.2"
 WT_RAW_URL="https://raw.githubusercontent.com/GuyAglionby/wt/main/wt"
 
 # ─── Usage ────────────────────────────────────────────────────────────────────
@@ -109,7 +109,8 @@ get_worktree_path() {
     repo_name=$(basename "$repo_root")
     local parent_dir
     parent_dir=$(dirname "$repo_root")
-    echo "${parent_dir}/worktree--${repo_name}--${branch}"
+    local safe_branch="${branch//\//-}"
+    echo "${parent_dir}/worktree--${repo_name}--${safe_branch}"
 }
 
 get_worktree_name() {

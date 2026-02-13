@@ -162,6 +162,22 @@ load test_helper
     grep -q "Base content" "$REPO_DIR/.git/worktrees/$wt_name/agent_base/CLAUDE.md"
 }
 
+@test "add replaces slashes with dashes in directory name" {
+    cd "$REPO_DIR"
+    run wt add feature/my-thing
+    [ "$status" -eq 0 ]
+
+    local wt_dir
+    wt_dir=$(get_worktree_dir "feature/my-thing")
+    [ -d "$wt_dir" ]
+    # Directory name uses dashes, not slashes
+    [[ "$(basename "$wt_dir")" == *"feature-my-thing"* ]]
+    # But the git branch keeps the slash
+    local branch
+    branch=$(git -C "$wt_dir" rev-parse --abbrev-ref HEAD)
+    [ "$branch" = "feature/my-thing" ]
+}
+
 @test "add errors if worktree already exists" {
     cd "$REPO_DIR"
     wt add duplicate-test >/dev/null 2>&1

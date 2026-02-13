@@ -13,6 +13,28 @@ load test_helper
     [ -d "$expected" ]
 }
 
+@test "get_worktree_path replaces slashes with dashes" {
+    cd "$REPO_DIR"
+    run wt add feat/slash-test
+    [ "$status" -eq 0 ]
+
+    local wt_dir
+    wt_dir=$(get_worktree_dir "feat/slash-test")
+    [ -d "$wt_dir" ]
+    [[ "$(basename "$wt_dir")" == "worktree--myrepo--feat-slash-test" ]]
+}
+
+@test "resolve_worktree finds slash-branch by branch name" {
+    cd "$REPO_DIR"
+    wt add feat/resolve >/dev/null 2>&1
+    local wt_dir
+    wt_dir=$(get_worktree_dir "feat/resolve")
+
+    run wt cd feat/resolve
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"__WT_CD__:${wt_dir}"* ]]
+}
+
 @test "normalize_branch strips worktree--repo-- prefix" {
     cd "$REPO_DIR"
     # Create a worktree, then try to add using the directory-style name

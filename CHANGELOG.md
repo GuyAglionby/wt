@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.2
+
+### Fixed
+
+- `wt add` created directories with literal `/` in the name for branches like `feature/foo`, resulting in nested directories. Now replaces `/` with `-` in the directory name (e.g., `worktree--repo--feature-foo`). The git branch itself keeps the original name.
+
 ## 0.3.1
 
 ### Fixed

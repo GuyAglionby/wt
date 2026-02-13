@@ -57,11 +57,12 @@ commit_file() {
 
 get_worktree_dir() {
     local branch="$1"
+    local safe_branch="${branch//\//-}"
     local repo_name
     repo_name=$(basename "$REPO_DIR")
     local parent_dir
     parent_dir=$(dirname "$REPO_DIR")
-    echo "${parent_dir}/worktree--${repo_name}--${branch}"
+    echo "${parent_dir}/worktree--${repo_name}--${safe_branch}"
 }
 
 create_worktree() {
