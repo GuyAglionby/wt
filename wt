@@ -180,8 +180,24 @@ _get_github_remote() {
     local repo_root="$1"
     local nwo
     nwo=$(cd "$repo_root" && gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null) || return 1
-    local remote_name
-    remote_name=$(git -C "$repo_root" remote -v | grep -F "$nwo" | head -1 | awk '{print $1}')
+
+    # Get GitHub hostname to disambiguate when multiple remotes contain the nwo
+    local gh_host="" url
+    url=$(cd "$repo_root" && gh repo view --json url --jq '.url' 2>/dev/null) || true
+    if [[ -n "$url" ]]; then
+        gh_host="${url#https://}"
+        gh_host="${gh_host%%/*}"
+    fi
+
+    local remote_name=""
+    if [[ -n "$gh_host" ]]; then
+        remote_name=$(git -C "$repo_root" remote -v | grep -F "$gh_host" | grep -F "$nwo" | head -1 | awk '{print $1}')
+    fi
+    # Fallback: match by nwo only
+    if [[ -z "$remote_name" ]]; then
+        remote_name=$(git -C "$repo_root" remote -v | grep -F "$nwo" | head -1 | awk '{print $1}')
+    fi
+
     if [[ -n "$remote_name" ]]; then
         echo "$remote_name"
         return 0

@@ -140,6 +140,40 @@ load test_helper
     [[ "$output" == *"additional commits"* ]]
 }
 
+@test "rm uses GitHub remote not first alphabetical remote matching nwo" {
+    cd "$REPO_DIR"
+    commit_file "base.txt"
+    create_worktree "gh-upstream"
+
+    local wt_dir
+    wt_dir=$(get_worktree_dir "gh-upstream")
+    cd "$wt_dir"
+    commit_file "feature.txt"
+    cd "$REPO_DIR"
+
+    # Merge the branch into main
+    local pre_merge
+    pre_merge=$(git rev-parse main)
+    git merge gh-upstream -m "Merge gh-upstream" >/dev/null 2>&1
+
+    # Two remotes whose URLs both contain the nwo "myorg/myrepo"
+    # origin is NOT GitHub, upstream IS GitHub
+    git remote add origin "https://gitlab.com/myorg/myrepo.git"
+    git remote add upstream "https://github.com/myorg/myrepo.git"
+
+    # upstream/main has the merge; origin/main does not
+    git update-ref refs/remotes/upstream/main "$(git rev-parse main)"
+    git update-ref refs/remotes/origin/main "$pre_merge"
+
+    # gh returns nwo (matches both URLs) plus GitHub URL for disambiguation
+    mock_gh "" "myorg/myrepo" "main" "https://github.com/myorg/myrepo"
+
+    run wt rm gh-upstream
+    [ "$status" -eq 0 ]
+    # Should detect merge via upstream/main, not origin/main
+    [[ "$output" == *"Branch deleted"* ]]
+}
+
 @test "rm retains branch when PR exists but is not merged" {
     cd "$REPO_DIR"
     commit_file "base.txt"

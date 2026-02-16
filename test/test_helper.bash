@@ -84,6 +84,7 @@ mock_gh() {
     local pr_output="${1:-}"
     local repo_nwo="${2:-}"
     local default_branch="${3:-main}"
+    local repo_url="${4:-}"
     cat > "$TEST_DIR/bin/gh" <<GHEOF
 #!/usr/bin/env bash
 if [[ "\$1" == "pr" ]]; then
@@ -93,6 +94,7 @@ elif [[ "\$1" == "repo" ]]; then
         case "\$arg" in
             *nameWithOwner*) echo '$repo_nwo'; exit 0 ;;
             *defaultBranchRef*) echo '$default_branch'; exit 0 ;;
+            *url*) echo '$repo_url'; exit 0 ;;
         esac
     done
 fi
