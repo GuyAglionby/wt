@@ -12,7 +12,7 @@ set -euo pipefail
 # Manual setup (alternative to wt install):
 #   Add to your .bashrc/.zshrc: eval "$(wt init)"
 
-WT_VERSION="0.3.2"
+WT_VERSION="0.3.3"
 WT_RAW_URL="https://raw.githubusercontent.com/GuyAglionby/wt/main/wt"
 
 # ─── Usage ────────────────────────────────────────────────────────────────────
@@ -1121,12 +1121,27 @@ cmd_copy() {
         exit 1
     fi
 
+    # Resolve relative paths against the cwd prefix within the current worktree
+    local cwd_prefix
+    cwd_prefix=$(git rev-parse --show-prefix 2>/dev/null)  # e.g. "scripts/" or ""
+    cwd_prefix="${cwd_prefix%/}"  # strip trailing slash
+
+    local resolved_paths=()
+    for p in "${paths[@]}"; do
+        p="${p%/}"
+        if [[ "$p" == /* || -z "$cwd_prefix" ]]; then
+            resolved_paths+=("$p")
+        else
+            resolved_paths+=("$cwd_prefix/$p")
+        fi
+    done
+
     # Expand paths to individual files relative to source worktree root
     local files=()
     local missing=()
     local untracked_errors=()
 
-    for path in "${paths[@]}"; do
+    for path in "${resolved_paths[@]}"; do
         path="${path%/}"
         local source_path="$source_worktree/$path"
         if [[ -d "$source_path" ]]; then

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.3
+
+### Fixed
+
+- `wt cp` resolved file paths relative to the worktree root instead of the current working directory. Running `wt cp foo.sh other` from a subdirectory like `scripts/` would fail with "path not found" because it looked for `foo.sh` at the repo root instead of `scripts/foo.sh`. Now uses `git rev-parse --show-prefix` to prepend the cwd prefix to relative paths.
+
 ## 0.3.2
 
 ### Fixed

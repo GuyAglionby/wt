@@ -149,6 +149,38 @@ teardown() {
     [ -f "$REPO_DIR/subdir/b.txt" ]
 }
 
+@test "copy: push works from subdirectory" {
+    cd "$REPO_DIR"
+    mkdir -p scripts
+    commit_file "scripts/deploy.sh" "deploy content"
+
+    local wt_dir
+    wt_dir=$(get_worktree_dir "other")
+
+    cd "$REPO_DIR/scripts"
+    run wt copy deploy.sh other
+    [ "$status" -eq 0 ]
+    [ -f "$wt_dir/scripts/deploy.sh" ]
+    grep -q "deploy content" "$wt_dir/scripts/deploy.sh"
+}
+
+@test "copy: pull works from subdirectory" {
+    local wt_dir
+    wt_dir=$(get_worktree_dir "other")
+    cd "$wt_dir"
+    mkdir -p scripts
+    commit_file "scripts/build.sh" "build content"
+
+    cd "$REPO_DIR"
+    mkdir -p scripts
+    cd scripts
+
+    run wt copy other build.sh
+    [ "$status" -eq 0 ]
+    [ -f "$REPO_DIR/scripts/build.sh" ]
+    grep -q "build content" "$REPO_DIR/scripts/build.sh"
+}
+
 @test "copy errors on missing source path" {
     cd "$REPO_DIR"
     run wt copy other nonexistent.txt
