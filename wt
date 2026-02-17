@@ -12,7 +12,7 @@ set -euo pipefail
 # Manual setup (alternative to wt install):
 #   Add to your .bashrc/.zshrc: eval "$(wt init)"
 
-WT_VERSION="0.3.3"
+WT_VERSION="0.4.0"
 WT_RAW_URL="https://raw.githubusercontent.com/GuyAglionby/wt/main/wt"
 
 # ─── Usage ────────────────────────────────────────────────────────────────────
@@ -87,6 +87,19 @@ files, detached HEADs, or unmerged commits.
 Options:
   --dry-run                 Show what would be removed without making changes
   -h, --help                Show this help
+EOF
+    exit "${1:-0}"
+}
+
+usage_add() {
+    cat <<EOF
+wt add - create a worktree for a branch
+
+Usage: wt add <branch> [options]
+
+Options:
+  --no-check-remote       Skip checking remotes for the branch
+  -h, --help              Show this help
 EOF
     exit "${1:-0}"
 }
@@ -490,13 +503,46 @@ HOOKEOF
     chmod +x "$hook_file"
 }
 
+_find_remote_branches() {
+    local repo_root="$1"
+    local branch="$2"
+    local remote
+    while IFS= read -r remote; do
+        if git -C "$repo_root" ls-remote --heads "$remote" "refs/heads/$branch" 2>/dev/null | grep -q .; then
+            echo "$remote"
+        fi
+    done < <(git -C "$repo_root" remote)
+}
+
 # ─── Worktree commands ───────────────────────────────────────────────────────
 
 cmd_add() {
-    local branch="${1:-}"
+    local branch=""
+    local no_check_remote=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                usage_add
+                ;;
+            --no-check-remote)
+                no_check_remote=1
+                shift
+                ;;
+            *)
+                if [[ -n "$branch" ]]; then
+                    echo "Error: unexpected argument '$1'" >&2
+                    usage_add 1
+                fi
+                branch="$1"
+                shift
+                ;;
+        esac
+    done
+
     if [[ -z "$branch" ]]; then
         echo "Error: branch name required" >&2
-        usage
+        usage_add 1
     fi
     branch=$(normalize_branch "$branch")
 
@@ -516,7 +562,50 @@ cmd_add() {
     if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$branch"; then
         git -C "$repo_root" worktree add "$worktree_path" "$branch"
     else
-        git -C "$repo_root" worktree add -b "$branch" "$worktree_path" "$start_point"
+        local from_remote=""
+        if [[ -z "$no_check_remote" ]]; then
+            local remotes=""
+            remotes=$(_find_remote_branches "$repo_root" "$branch")
+            local remote_count=0
+            local single_remote=""
+            while IFS= read -r r; do
+                [[ -z "$r" ]] && continue
+                ((remote_count++)) || true
+                single_remote="$r"
+            done <<< "$remotes"
+
+            if [[ $remote_count -eq 1 ]]; then
+                printf "Branch '%s' found on remote '%s'. Check it out? [Y/n] " "$branch" "$single_remote" >&2
+                local answer
+                read -r answer </dev/tty 2>/dev/null || answer=""
+                if [[ -z "$answer" || "$answer" == [Yy]* ]]; then
+                    from_remote="$single_remote"
+                fi
+            elif [[ $remote_count -gt 1 ]]; then
+                echo "Branch '$branch' found on multiple remotes:" >&2
+                local remote_list=()
+                while IFS= read -r r; do
+                    [[ -z "$r" ]] && continue
+                    remote_list+=("$r")
+                done <<< "$remotes"
+
+                PS3="Select a remote (or skip to create a new branch): " >&2
+                select chosen in "${remote_list[@]}" "skip"; do
+                    if [[ "$chosen" == "skip" || -z "$chosen" ]]; then
+                        break
+                    fi
+                    from_remote="$chosen"
+                    break
+                done </dev/tty 2>/dev/null || true
+            fi
+        fi
+
+        if [[ -n "$from_remote" ]]; then
+            git -C "$repo_root" fetch "$from_remote" "$branch"
+            git -C "$repo_root" worktree add --track -b "$branch" "$worktree_path" "${from_remote}/${branch}"
+        else
+            git -C "$repo_root" worktree add -b "$branch" "$worktree_path" "$start_point"
+        fi
     fi
 
     local worktree_name
@@ -1440,7 +1529,7 @@ _wt_complete_cd() {
 }
 
 _wt_complete_add() {
-    _wt_git_branches
+    _arguments '--no-check-remote[Skip checking remotes]' '*:branch:_wt_git_branches'
 }
 
 _wt_complete_rm() {
@@ -1617,6 +1706,7 @@ for arg in "$@"; do
     case "$arg" in
         -h|--help)
             case "$command" in
+                add)           usage_add ;;
                 rm|remove)     usage_rm ;;
                 cleanup)       usage_cleanup ;;
                 copy|cp)       usage_copy ;;
@@ -1645,6 +1735,7 @@ case "$command" in
     -h|--help)      usage 0 ;;
     help)
         case "${1:-}" in
+            add)           usage_add ;;
             rm|remove)     usage_rm ;;
             cleanup)       usage_cleanup ;;
             copy|cp)       usage_copy ;;

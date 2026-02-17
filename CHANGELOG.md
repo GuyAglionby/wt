@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.0
+
+### Added
+
+- `wt add` now checks remotes when the branch doesn't exist locally. If the branch is found on a single remote, prompts to check it out as a tracking branch. If found on multiple remotes, shows a selection menu. Use `--no-check-remote` to skip and create a new branch directly.
+
 ## 0.3.3
 
 ### Fixed

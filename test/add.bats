@@ -204,3 +204,139 @@ load test_helper
     cd_path=$(get_signal "__WT_CD__")
     [ "$cd_path" = "$wt_dir" ]
 }
+
+# ─── Remote branch checking ─────────────────────────────────────────────────
+
+@test "add --no-check-remote skips remote check" {
+    cd "$REPO_DIR"
+
+    # Create a bare remote with a branch
+    local remote_bare="$TEST_DIR/remote.git"
+    git init --bare "$remote_bare" >/dev/null 2>&1
+    git remote add origin "$remote_bare"
+    git push origin main >/dev/null 2>&1
+
+    # Create a branch on the remote with a different commit
+    local clone_dir="$TEST_DIR/clone"
+    git clone "$remote_bare" "$clone_dir" >/dev/null 2>&1
+    git -C "$clone_dir" checkout -b remote-feature >/dev/null 2>&1
+    git -C "$clone_dir" commit --allow-empty -m "Remote commit" >/dev/null 2>&1
+    local remote_head
+    remote_head=$(git -C "$clone_dir" rev-parse HEAD)
+    git -C "$clone_dir" push origin remote-feature >/dev/null 2>&1
+
+    local local_head
+    local_head=$(git rev-parse HEAD)
+
+    run wt add --no-check-remote remote-feature
+    [ "$status" -eq 0 ]
+
+    local wt_dir
+    wt_dir=$(get_worktree_dir "remote-feature")
+    local wt_head
+    wt_head=$(git -C "$wt_dir" rev-parse HEAD)
+    # Should match local HEAD, not remote
+    [ "$wt_head" = "$local_head" ]
+    [ "$wt_head" != "$remote_head" ]
+}
+
+@test "add creates new branch when no remote has it" {
+    cd "$REPO_DIR"
+
+    # Create a bare remote without the target branch
+    local remote_bare="$TEST_DIR/remote.git"
+    git init --bare "$remote_bare" >/dev/null 2>&1
+    git remote add origin "$remote_bare"
+    git push origin main >/dev/null 2>&1
+
+    local local_head
+    local_head=$(git rev-parse HEAD)
+
+    run wt add brand-new-branch
+    [ "$status" -eq 0 ]
+
+    local wt_dir
+    wt_dir=$(get_worktree_dir "brand-new-branch")
+    local wt_head
+    wt_head=$(git -C "$wt_dir" rev-parse HEAD)
+    [ "$wt_head" = "$local_head" ]
+}
+
+@test "add fetches and tracks remote branch when tty unavailable" {
+    cd "$REPO_DIR"
+
+    # Create a bare remote with a branch
+    local remote_bare="$TEST_DIR/remote.git"
+    git init --bare "$remote_bare" >/dev/null 2>&1
+    git remote add origin "$remote_bare"
+    git push origin main >/dev/null 2>&1
+
+    # Create a branch on the remote with a different commit
+    local clone_dir="$TEST_DIR/clone"
+    git clone "$remote_bare" "$clone_dir" >/dev/null 2>&1
+    git -C "$clone_dir" checkout -b remote-feature >/dev/null 2>&1
+    git -C "$clone_dir" commit --allow-empty -m "Remote commit" >/dev/null 2>&1
+    local remote_head
+    remote_head=$(git -C "$clone_dir" rev-parse HEAD)
+    git -C "$clone_dir" push origin remote-feature >/dev/null 2>&1
+
+    # Run without tty - default answer is Y (empty input = confirm)
+    run wt add remote-feature
+    [ "$status" -eq 0 ]
+
+    local wt_dir
+    wt_dir=$(get_worktree_dir "remote-feature")
+    local wt_head
+    wt_head=$(git -C "$wt_dir" rev-parse HEAD)
+    # Should match the remote commit since it was fetched and tracked
+    [ "$wt_head" = "$remote_head" ]
+
+    # Verify the prompt was shown
+    [[ "$output" == *"found on remote"* ]]
+}
+
+@test "add with multiple remotes creates new branch when tty unavailable" {
+    cd "$REPO_DIR"
+
+    # Create two bare remotes, both with the branch
+    local remote1="$TEST_DIR/remote1.git"
+    local remote2="$TEST_DIR/remote2.git"
+    git init --bare "$remote1" >/dev/null 2>&1
+    git init --bare "$remote2" >/dev/null 2>&1
+    git remote add origin "$remote1"
+    git remote add upstream "$remote2"
+    git push origin main >/dev/null 2>&1
+    git push upstream main >/dev/null 2>&1
+
+    local clone_dir="$TEST_DIR/clone"
+    git clone "$remote1" "$clone_dir" >/dev/null 2>&1
+    git -C "$clone_dir" checkout -b shared-feature >/dev/null 2>&1
+    git -C "$clone_dir" commit --allow-empty -m "Remote commit" >/dev/null 2>&1
+    git -C "$clone_dir" push origin shared-feature >/dev/null 2>&1
+    git -C "$clone_dir" remote add upstream "$remote2"
+    git -C "$clone_dir" push upstream shared-feature >/dev/null 2>&1
+
+    local local_head
+    local_head=$(git rev-parse HEAD)
+
+    # select menu can't get tty input, falls through to new branch
+    run wt add shared-feature
+    [ "$status" -eq 0 ]
+
+    local wt_dir
+    wt_dir=$(get_worktree_dir "shared-feature")
+    local wt_head
+    wt_head=$(git -C "$wt_dir" rev-parse HEAD)
+    # Should be local HEAD since select couldn't get input
+    [ "$wt_head" = "$local_head" ]
+
+    # Verify it mentioned multiple remotes
+    [[ "$output" == *"found on multiple remotes"* ]]
+}
+
+@test "add --help shows add usage" {
+    cd "$REPO_DIR"
+    run wt add --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"--no-check-remote"* ]]
+}
