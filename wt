@@ -12,7 +12,7 @@ set -euo pipefail
 # Manual setup (alternative to wt install):
 #   Add to your .bashrc/.zshrc: eval "$(wt init)"
 
-WT_VERSION="0.4.0"
+WT_VERSION="0.4.1"
 WT_RAW_URL="https://raw.githubusercontent.com/GuyAglionby/wt/main/wt"
 
 # ─── Usage ────────────────────────────────────────────────────────────────────
@@ -261,6 +261,17 @@ _check_branch_merged() {
         echo "delete:commits already in ${default_branch}"
         return 0
     fi
+
+    # Local branch check: is branch HEAD reachable from any other local branch?
+    # Merged into main (not yet pushed), or into any other branch, is enough to allow deletion.
+    local other_branch
+    for other_branch in $(git -C "$repo_root" for-each-ref --format='%(refname:short)' refs/heads/ 2>/dev/null); do
+        [[ "$other_branch" == "$branch" ]] && continue
+        if git -C "$repo_root" merge-base --is-ancestor "$branch_head" "refs/heads/${other_branch}" 2>/dev/null; then
+            echo "delete:commits already in ${other_branch}"
+            return 0
+        fi
+    done
 
     # GitHub PR check (for squash/rebase merges where commit hashes differ)
     if ! command -v gh &>/dev/null; then

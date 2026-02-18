@@ -44,7 +44,8 @@ When removing a worktree (`_rm_single`), the branch deletion decision follows th
 2. No `starting_commit` recorded → retain
 3. HEAD equals `starting_commit` → delete (no work done)
 4. HEAD differs from `starting_commit` → call `_check_branch_merged`:
-   - **Fast local check**: is branch HEAD reachable from `remote/default_branch`? Catches merge commits (hashes preserved) and fast-forwards without any API calls.
+   - **Fast local check (remote)**: is branch HEAD reachable from `remote/default_branch`? Catches merge commits (hashes preserved) and fast-forwards without any API calls.
+   - **Local branch check**: is branch HEAD reachable from any other local branch (e.g. local main not yet pushed, or another branch like develop)? If so, the branch is considered merged and is deleted.
    - **GitHub PR check**: uses `gh` to find a merged PR for the branch. If the PR is merged and local HEAD is at or behind the PR's final commit (`headRefOid`), the branch is safe to delete. Handles squash/rebase merges where commit hashes differ, and handles the common case where the remote branch was deleted after merge.
    - If `gh` is not installed, or there's no PR, or the PR isn't merged → falls through to the original "retain" behavior.
 

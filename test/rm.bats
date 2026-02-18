@@ -95,6 +95,56 @@ load test_helper
     [[ "$output" == *"already in"* ]]
 }
 
+@test "rm deletes branch when merged into local main (fast-forward) even if remote main not pushed" {
+    cd "$REPO_DIR"
+    commit_file "base.txt"
+    create_worktree "repo-colour"
+
+    local wt_dir
+    wt_dir=$(get_worktree_dir "repo-colour")
+    cd "$wt_dir"
+    commit_file "internal/ui/home.go"
+    commit_file "internal/ui/styles.go"
+    cd "$REPO_DIR"
+
+    # Merge branch into local main (fast-forward). Do NOT update remote ref —
+    # user has not pushed yet. refs/remotes/origin/main stays at pre-merge commit.
+    local main_before_merge
+    main_before_merge=$(git rev-parse main)
+    git update-ref refs/remotes/origin/main "$main_before_merge"
+    git merge repo-colour >/dev/null 2>&1
+
+    run wt rm repo-colour
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Branch deleted"* ]]
+    [[ "$output" == *"already in"* ]]
+    ! git show-ref --verify --quiet "refs/heads/repo-colour"
+}
+
+@test "rm deletes branch when merged into another local branch (not main)" {
+    cd "$REPO_DIR"
+    commit_file "base.txt"
+    git branch develop
+    create_worktree "feature"
+
+    local wt_dir
+    wt_dir=$(get_worktree_dir "feature")
+    cd "$wt_dir"
+    commit_file "feature.txt"
+    cd "$REPO_DIR"
+
+    # Merge feature into develop, not main. Remote develop not updated.
+    git checkout develop >/dev/null 2>&1
+    git merge feature >/dev/null 2>&1
+    git checkout main >/dev/null 2>&1
+
+    run wt rm feature
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Branch deleted"* ]]
+    [[ "$output" == *"already in develop"* ]]
+    ! git show-ref --verify --quiet "refs/heads/feature"
+}
+
 @test "rm deletes branch when GitHub PR is merged and local matches PR head" {
     cd "$REPO_DIR"
     commit_file "base.txt"

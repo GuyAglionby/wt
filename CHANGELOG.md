@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1
+
+### Fixed
+
+- `wt rm` now deletes the branch when it has been merged into **any** local branch, not only when reachable from the remote default branch. If the branch is reachable from the remote default branch, behavior is unchanged. Otherwise, if the branch is reachable from any other local branch (e.g. local main not yet pushed, or another branch like `develop`), the branch is considered merged and is deleted. This fixes the case where you fast-forward merge into local main and run `wt rm` before pushing.
+
 ## 0.4.0
 
 ### Added
