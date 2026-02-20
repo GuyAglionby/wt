@@ -193,3 +193,153 @@ teardown() {
     run wt copy
     [ "$status" -ne 0 ]
 }
+
+# --- Branch-qualified path syntax (branch/path) ---
+
+@test "copy: branch/path syntax pulls single file" {
+    local wt_dir
+    wt_dir=$(get_worktree_dir "other")
+    cd "$wt_dir"
+    commit_file "feature.txt" "from other"
+    cd "$REPO_DIR"
+
+    run wt copy other/feature.txt .
+    [ "$status" -eq 0 ]
+    [ -f "$REPO_DIR/feature.txt" ]
+    grep -q "from other" "$REPO_DIR/feature.txt"
+}
+
+@test "copy: branch/path syntax pulls nested file" {
+    local wt_dir
+    wt_dir=$(get_worktree_dir "other")
+    cd "$wt_dir"
+    mkdir -p src/utils
+    commit_file "src/utils/helper.py" "helper content"
+    cd "$REPO_DIR"
+
+    run wt copy other/src/utils/helper.py .
+    [ "$status" -eq 0 ]
+    [ -f "$REPO_DIR/src/utils/helper.py" ]
+    grep -q "helper content" "$REPO_DIR/src/utils/helper.py"
+}
+
+@test "copy: branch/path syntax pulls multiple files" {
+    local wt_dir
+    wt_dir=$(get_worktree_dir "other")
+    cd "$wt_dir"
+    commit_file "a.txt" "file a"
+    commit_file "b.txt" "file b"
+    cd "$REPO_DIR"
+
+    run wt copy other/a.txt other/b.txt .
+    [ "$status" -eq 0 ]
+    [ -f "$REPO_DIR/a.txt" ]
+    [ -f "$REPO_DIR/b.txt" ]
+    grep -q "file a" "$REPO_DIR/a.txt"
+    grep -q "file b" "$REPO_DIR/b.txt"
+}
+
+@test "copy: branch/path syntax pulls directory" {
+    local wt_dir
+    wt_dir=$(get_worktree_dir "other")
+    cd "$wt_dir"
+    mkdir -p subdir
+    commit_file "subdir/x.txt" "x content"
+    commit_file "subdir/y.txt" "y content"
+    cd "$REPO_DIR"
+
+    run wt copy other/subdir .
+    [ "$status" -eq 0 ]
+    [ -f "$REPO_DIR/subdir/x.txt" ]
+    [ -f "$REPO_DIR/subdir/y.txt" ]
+}
+
+@test "copy: branch/path syntax with slash in branch name" {
+    cd "$REPO_DIR"
+    create_worktree "feature/login"
+    local wt_dir
+    wt_dir=$(get_worktree_dir "feature/login")
+    cd "$wt_dir"
+    commit_file "auth.py" "auth code"
+    cd "$REPO_DIR"
+
+    run wt copy feature/login/auth.py .
+    [ "$status" -eq 0 ]
+    [ -f "$REPO_DIR/auth.py" ]
+    grep -q "auth code" "$REPO_DIR/auth.py"
+}
+
+@test "copy: branch/path syntax errors on missing path" {
+    cd "$REPO_DIR"
+
+    run wt copy other/nonexistent.txt .
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not found"* ]]
+}
+
+@test "copy: branch/path syntax respects --overwrite" {
+    local wt_dir
+    wt_dir=$(get_worktree_dir "other")
+    cd "$wt_dir"
+    commit_file "conflict.txt" "other version"
+    cd "$REPO_DIR"
+
+    echo "local version" > "$REPO_DIR/conflict.txt"
+
+    run wt copy --overwrite other/conflict.txt .
+    [ "$status" -eq 0 ]
+    grep -q "other version" "$REPO_DIR/conflict.txt"
+}
+
+@test "copy: branch/path syntax hints when branch has no worktree" {
+    cd "$REPO_DIR"
+    # Create a branch without a worktree
+    git branch no-worktree-branch
+
+    run wt copy no-worktree-branch/some/file.py .
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"no worktree"* ]]
+    [[ "$output" == *"wt add"* ]]
+}
+
+@test "copy: branch/path syntax rejects push direction" {
+    cd "$REPO_DIR"
+    commit_file "local.txt" "local content"
+
+    run wt copy local.txt other/dest
+    [ "$status" -ne 0 ]
+}
+
+@test "copy: branch/path syntax works from linked worktree" {
+    # Create two linked worktrees
+    create_worktree "source-branch"
+    create_worktree "dest-branch"
+
+    local source_dir dest_dir
+    source_dir=$(get_worktree_dir "source-branch")
+    dest_dir=$(get_worktree_dir "dest-branch")
+
+    # Add a file to source worktree
+    cd "$source_dir"
+    commit_file "src/module.py" "module content"
+
+    # Run from dest worktree, pull from source
+    cd "$dest_dir"
+    run wt copy source-branch/src/module.py .
+    [ "$status" -eq 0 ]
+    [ -f "$dest_dir/src/module.py" ]
+    grep -q "module content" "$dest_dir/src/module.py"
+}
+
+@test "copy: old syntax still works with branch/path available" {
+    local wt_dir
+    wt_dir=$(get_worktree_dir "other")
+    cd "$wt_dir"
+    commit_file "old-style.txt" "old style content"
+    cd "$REPO_DIR"
+
+    run wt copy other old-style.txt
+    [ "$status" -eq 0 ]
+    [ -f "$REPO_DIR/old-style.txt" ]
+    grep -q "old style content" "$REPO_DIR/old-style.txt"
+}

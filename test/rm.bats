@@ -13,7 +13,7 @@ load test_helper
     run wt rm no-changes
     [ "$status" -eq 0 ]
     [[ "$output" == *"Branch deleted"* ]]
-    [[ "$output" == *"no changes"* ]]
+    [[ "$output" == *"already in"* ]]
 
     # Branch should be gone
     ! git show-ref --verify --quiet "refs/heads/no-changes"
@@ -51,6 +51,26 @@ load test_helper
     [ "$status" -eq 0 ]
     [[ "$output" == *"Branch retained"* ]]
     [[ "$output" == *"no starting commit"* ]]
+}
+
+@test "rm retains pre-existing branch with unmerged work when no new commits made" {
+    cd "$REPO_DIR"
+    commit_file "base.txt"
+
+    # Create a branch with work that is NOT on main
+    git checkout -b has-work >/dev/null 2>&1
+    commit_file "feature.txt"
+    git checkout main >/dev/null 2>&1
+
+    # Add a worktree for the existing branch (no new commits)
+    create_worktree "has-work"
+
+    run wt rm has-work
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Branch retained"* ]]
+
+    # Branch must still exist
+    git show-ref --verify --quiet "refs/heads/has-work"
 }
 
 @test "rm --force-delete-branch always deletes" {

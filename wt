@@ -12,7 +12,7 @@ set -euo pipefail
 # Manual setup (alternative to wt install):
 #   Add to your .bashrc/.zshrc: eval "$(wt init)"
 
-WT_VERSION="0.4.1"
+WT_VERSION="0.5.1"
 WT_RAW_URL="https://raw.githubusercontent.com/GuyAglionby/wt/main/wt"
 
 # ─── Usage ────────────────────────────────────────────────────────────────────
@@ -63,13 +63,20 @@ usage_copy() {
     cat <<EOF
 wt copy - copy files between worktrees
 
-Usage: wt copy <branch> <path>...   (pull from another worktree)
-       wt copy <path>... <branch>   (push to another worktree)
+Usage: wt copy <branch> <path>...            (pull from another worktree)
+       wt copy <path>... <branch>            (push to another worktree)
+       wt copy <branch/path>... <dest>       (pull specific paths from a branch)
 
 Options:
   --include-untracked       Include untracked files (default: tracked only)
   --overwrite               Overwrite conflicting files instead of failing
   -h, --help                Show this help
+
+Examples:
+  wt copy feature file.py             Pull file.py from feature branch
+  wt copy feature/file.py .           Same, using branch/path syntax
+  wt copy feature/src/ .              Pull entire src/ directory from feature
+  wt copy file.py feature             Push file.py to feature branch
 EOF
     exit "${1:-0}"
 }
@@ -185,6 +192,64 @@ resolve_worktree() {
     fi
 
     echo "$worktree_path"
+}
+
+# Try to split an argument into a branch/worktree prefix and a relative path.
+# Tries progressively longer prefixes of arg as branch names via resolve_worktree,
+# returning the longest match. This handles branch names containing slashes
+# (e.g., "feature/login/file.py" correctly matches branch "feature/login").
+# On success: prints worktree_path, branch_prefix, relative_path (one per line), returns 0.
+# On failure: returns 1.
+try_split_branch_path() {
+    local arg="$1"
+    local repo_root="$2"
+
+    # Must contain a slash
+    case "$arg" in
+        */*) ;;
+        *) return 1 ;;
+    esac
+
+    local remaining="$arg"
+    local prefix=""
+    local best_worktree="" best_prefix="" best_remaining=""
+
+    while [[ "$remaining" == */* ]]; do
+        local segment="${remaining%%/*}"
+        remaining="${remaining#*/}"
+
+        if [[ -z "$prefix" ]]; then
+            prefix="$segment"
+        else
+            prefix="$prefix/$segment"
+        fi
+
+        local worktree
+        worktree=$(resolve_worktree "$prefix" "$repo_root" 2>/dev/null) || continue
+
+        best_worktree="$worktree"
+        best_prefix="$prefix"
+        best_remaining="$remaining"
+    done
+
+    if [[ -n "$best_worktree" ]]; then
+        echo "$best_worktree"
+        echo "$best_prefix"
+        echo "$best_remaining"
+        return 0
+    fi
+
+    return 1
+}
+
+# Internal subcommand: resolve a branch/path argument.
+# Used by shell completions and testable via bats.
+# Prints: worktree_path, branch_prefix, relative_path (one per line).
+_cmd_resolve_branch_path() {
+    local arg="${1:?usage: wt _resolve-branch-path <branch/path>}"
+    local repo_root
+    repo_root=$(get_repo_root)
+    try_split_branch_path "$arg" "$repo_root"
 }
 
 # Resolve the git remote name that corresponds to the GitHub repo.
@@ -684,11 +749,6 @@ _decide_branch_deletion() {
         return 1
     fi
 
-    if [[ "$branch_head" == "$starting_commit" ]]; then
-        echo "delete:no changes from starting commit"
-        return 0
-    fi
-
     local merge_check
     merge_check=$(_check_branch_merged "$repo_root" "$branch" "$branch_head") || true
     case "$merge_check" in
@@ -701,7 +761,7 @@ _decide_branch_deletion() {
             return 1
             ;;
         *)
-            echo "retain:has commits beyond starting point"
+            echo "retain:could not confirm branch is merged"
             return 1
             ;;
     esac
@@ -1194,63 +1254,154 @@ cmd_copy() {
     local current_worktree
     current_worktree=$(git rev-parse --show-toplevel)
 
-    # Detect direction: try resolving first and last positional as worktrees
-    local first_arg="${positionals[0]}"
-    local last_arg="${positionals[${#positionals[@]}-1]}"
-    local first_resolved="" last_resolved=""
+    # --- Detect direction ---
+    # Phase 1: Scan for branch-qualified paths (e.g., branch/path/file.py)
+    local remote_wt=""
+    local branch_display=""
+    local qualified_paths=()
+    local has_qualified=0
+    local last_is_qualified=0
 
-    first_resolved=$(resolve_worktree "$first_arg" "$repo_root" 2>/dev/null) || true
-    if [[ -n "$first_resolved" && "$first_resolved" == "$current_worktree" ]]; then
-        first_resolved=""
-    fi
+    for ((i=0; i < ${#positionals[@]}; i++)); do
+        local arg="${positionals[$i]}"
 
-    last_resolved=$(resolve_worktree "$last_arg" "$repo_root" 2>/dev/null) || true
-    if [[ -n "$last_resolved" && "$last_resolved" == "$current_worktree" ]]; then
-        last_resolved=""
-    fi
+        # Skip if the full arg resolves as a bare worktree pointing elsewhere
+        local bare_resolved
+        bare_resolved=$(resolve_worktree "$arg" "$repo_root" 2>/dev/null) || true
+        if [[ -n "$bare_resolved" && "$bare_resolved" != "$current_worktree" ]]; then
+            continue
+        fi
 
-    local source_worktree dest_worktree branch_arg
-    local paths=()
+        # Try branch-qualified path parsing
+        local split_result
+        if split_result=$(try_split_branch_path "$arg" "$repo_root"); then
+            local wt_path branch_name rel_path
+            wt_path=$(printf '%s\n' "$split_result" | sed -n '1p')
+            branch_name=$(printf '%s\n' "$split_result" | sed -n '2p')
+            rel_path=$(printf '%s\n' "$split_result" | sed -n '3p')
 
-    if [[ -n "$first_resolved" && -n "$last_resolved" ]]; then
-        echo "Error: both '${first_arg}' and '${last_arg}' resolve to worktrees; ambiguous direction" >&2
-        exit 1
-    elif [[ -n "$first_resolved" ]]; then
-        # Pull: branch first → source=other, dest=current
-        source_worktree="$first_resolved"
+            # Skip if points to the current worktree
+            [[ "$wt_path" == "$current_worktree" ]] && continue
+
+            if [[ -n "$remote_wt" && "$remote_wt" != "$wt_path" ]]; then
+                echo "Error: paths reference multiple worktrees" >&2
+                exit 1
+            fi
+            remote_wt="$wt_path"
+            branch_display="$branch_name"
+            has_qualified=1
+            [[ -n "$rel_path" ]] && qualified_paths+=("$rel_path")
+
+            if [[ $i -eq $((${#positionals[@]} - 1)) ]]; then
+                last_is_qualified=1
+            fi
+        fi
+    done
+
+    local source_worktree="" dest_worktree="" branch_arg=""
+    local resolved_paths=()
+
+    if [[ $has_qualified -eq 1 && $last_is_qualified -eq 0 ]]; then
+        # Pull: branch-qualified source paths, last arg is local destination
+        if [[ ${#qualified_paths[@]} -eq 0 ]]; then
+            echo "Error: branch-qualified arguments must include a path (e.g., branch/file.py)" >&2
+            exit 1
+        fi
+        source_worktree="$remote_wt"
         dest_worktree="$current_worktree"
-        branch_arg="$first_arg"
-        paths=("${positionals[@]:1}")
-    elif [[ -n "$last_resolved" ]]; then
-        # Push: branch last → source=current, dest=other
-        source_worktree="$current_worktree"
-        dest_worktree="$last_resolved"
-        branch_arg="$last_arg"
-        paths=("${positionals[@]:0:${#positionals[@]}-1}")
-    else
-        echo "Error: neither '${first_arg}' nor '${last_arg}' resolves to a different worktree" >&2
+        branch_arg="$branch_display"
+        for p in "${qualified_paths[@]}"; do
+            resolved_paths+=("${p%/}")
+        done
+    elif [[ $has_qualified -eq 1 && $last_is_qualified -eq 1 ]]; then
+        echo "Error: branch/path syntax is only supported for source arguments" >&2
+        echo "To push files, use: wt cp <path>... <branch>" >&2
         exit 1
+    else
+        # Phase 2: Old syntax — bare branch detection on first/last positional
+        local first_arg="${positionals[0]}"
+        local last_arg="${positionals[${#positionals[@]}-1]}"
+        local first_resolved="" last_resolved=""
+
+        first_resolved=$(resolve_worktree "$first_arg" "$repo_root" 2>/dev/null) || true
+        if [[ -n "$first_resolved" && "$first_resolved" == "$current_worktree" ]]; then
+            first_resolved=""
+        fi
+
+        last_resolved=$(resolve_worktree "$last_arg" "$repo_root" 2>/dev/null) || true
+        if [[ -n "$last_resolved" && "$last_resolved" == "$current_worktree" ]]; then
+            last_resolved=""
+        fi
+
+        local paths=()
+
+        if [[ -n "$first_resolved" && -n "$last_resolved" ]]; then
+            echo "Error: both '${first_arg}' and '${last_arg}' resolve to worktrees; ambiguous direction" >&2
+            exit 1
+        elif [[ -n "$first_resolved" ]]; then
+            # Pull: branch first → source=other, dest=current
+            source_worktree="$first_resolved"
+            dest_worktree="$current_worktree"
+            branch_arg="$first_arg"
+            paths=("${positionals[@]:1}")
+        elif [[ -n "$last_resolved" ]]; then
+            # Push: branch last → source=current, dest=other
+            source_worktree="$current_worktree"
+            dest_worktree="$last_resolved"
+            branch_arg="$last_arg"
+            paths=("${positionals[@]:0:${#positionals[@]}-1}")
+        else
+            # Check if any arg looks like branch/path where branch has no worktree
+            local hint_branch=""
+            for arg in "${positionals[@]}"; do
+                case "$arg" in
+                    */*)
+                        local remaining="$arg" prefix=""
+                        while [[ "$remaining" == */* ]]; do
+                            local segment="${remaining%%/*}"
+                            remaining="${remaining#*/}"
+                            if [[ -z "$prefix" ]]; then
+                                prefix="$segment"
+                            else
+                                prefix="$prefix/$segment"
+                            fi
+                            if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$prefix" 2>/dev/null; then
+                                hint_branch="$prefix"
+                            fi
+                        done
+                        ;;
+                esac
+                [[ -n "$hint_branch" ]] && break
+            done
+
+            if [[ -n "$hint_branch" ]]; then
+                echo "Error: branch '$hint_branch' exists but has no worktree" >&2
+                echo "Run 'wt add $hint_branch' first, then retry" >&2
+            else
+                echo "Error: neither '${first_arg}' nor '${last_arg}' resolves to a different worktree" >&2
+            fi
+            exit 1
+        fi
+
+        # Resolve relative paths against the cwd prefix within the current worktree
+        local cwd_prefix
+        cwd_prefix=$(git rev-parse --show-prefix 2>/dev/null)  # e.g. "scripts/" or ""
+        cwd_prefix="${cwd_prefix%/}"  # strip trailing slash
+
+        for p in "${paths[@]}"; do
+            p="${p%/}"
+            if [[ "$p" == /* || -z "$cwd_prefix" ]]; then
+                resolved_paths+=("$p")
+            else
+                resolved_paths+=("$cwd_prefix/$p")
+            fi
+        done
     fi
 
     if [[ "$source_worktree" == "$dest_worktree" ]]; then
         echo "Error: source and destination are the same worktree" >&2
         exit 1
     fi
-
-    # Resolve relative paths against the cwd prefix within the current worktree
-    local cwd_prefix
-    cwd_prefix=$(git rev-parse --show-prefix 2>/dev/null)  # e.g. "scripts/" or ""
-    cwd_prefix="${cwd_prefix%/}"  # strip trailing slash
-
-    local resolved_paths=()
-    for p in "${paths[@]}"; do
-        p="${p%/}"
-        if [[ "$p" == /* || -z "$cwd_prefix" ]]; then
-            resolved_paths+=("$p")
-        else
-            resolved_paths+=("$cwd_prefix/$p")
-        fi
-    done
 
     # Expand paths to individual files relative to source worktree root
     local files=()
@@ -1563,12 +1714,33 @@ _wt_complete_copy() {
     local -a wt_branches
     wt_branches=(${(f)"$(git worktree list 2>/dev/null | awk -F'[][]' 'NF>1 {print $2}')"})
 
-    # Scan already-typed args (positions 3..CURRENT-1) for a branch
+    # If current word starts with "branch/", complete files from that worktree
+    local cur_word="${words[CURRENT]}"
+    if [[ "$cur_word" == */* ]]; then
+        local resolved
+        resolved=$(command wt _resolve-branch-path "$cur_word" 2>/dev/null)
+        if [[ -n "$resolved" ]]; then
+            local wt_path branch_name
+            wt_path=$(echo "$resolved" | sed -n '1p')
+            branch_name=$(echo "$resolved" | sed -n '2p')
+            compset -P "${(b)branch_name}/"
+            _path_files -W "$wt_path"
+            return
+        fi
+    fi
+
+    # Scan already-typed args (positions 3..CURRENT-1) for a branch (bare or qualified)
     local branch_found=0
     local branch_position=0
     local i
     for (( i=3; i < CURRENT; i++ )); do
-        if (( ${wt_branches[(Ie)${words[$i]}]} )); then
+        local arg="${words[$i]}"
+        if (( ${wt_branches[(Ie)${arg}]} )); then
+            branch_found=1
+            branch_position=$i
+            break
+        fi
+        if [[ "$arg" == */* ]] && command wt _resolve-branch-path "$arg" &>/dev/null; then
             branch_found=1
             branch_position=$i
             break
@@ -1582,7 +1754,13 @@ _wt_complete_copy() {
         fi
         # else: branch was later → push mode, command is complete, no completions
     else
-        # No branch yet → offer both branches and files
+        # No branch yet → offer branches with trailing slash (for branch/path syntax)
+        # and bare branches (for old syntax), plus files (for push mode)
+        local -a branch_slash=()
+        for b in "${wt_branches[@]}"; do
+            branch_slash+=("${b}/")
+        done
+        compadd -S '' -a branch_slash
         _describe -V 'worktree branch' wt_branches
         _files
     fi
@@ -1736,6 +1914,7 @@ case "$command" in
     mv|move)      cmd_move "$@" ;;
     list|ls|l)    cmd_list ;;
     copy|cp)      cmd_copy "$@" ;;
+    _resolve-branch-path) _cmd_resolve_branch_path "$@" ;;
     base)         cmd_base "$@" ;;
     sync-agent)  cmd_sync_agent "$@" ;;
     venv)         cmd_venv ;;

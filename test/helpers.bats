@@ -93,6 +93,52 @@ load test_helper
     [[ "$output" == *"no worktree found"* ]]
 }
 
+@test "_resolve-branch-path splits branch/path" {
+    cd "$REPO_DIR"
+    wt add test-branch >/dev/null 2>&1
+    local wt_dir
+    wt_dir=$(get_worktree_dir "test-branch")
+    cd "$wt_dir"
+    commit_file "src/app.py" "content"
+    cd "$REPO_DIR"
+
+    run wt _resolve-branch-path test-branch/src/app.py
+    [ "$status" -eq 0 ]
+    local wt_path branch_name rel_path
+    wt_path=$(echo "$output" | sed -n '1p')
+    branch_name=$(echo "$output" | sed -n '2p')
+    rel_path=$(echo "$output" | sed -n '3p')
+    [ "$wt_path" = "$wt_dir" ]
+    [ "$branch_name" = "test-branch" ]
+    [ "$rel_path" = "src/app.py" ]
+}
+
+@test "_resolve-branch-path handles slash in branch name" {
+    cd "$REPO_DIR"
+    wt add feat/login >/dev/null 2>&1
+
+    run wt _resolve-branch-path feat/login/auth.py
+    [ "$status" -eq 0 ]
+    local branch_name rel_path
+    branch_name=$(echo "$output" | sed -n '2p')
+    rel_path=$(echo "$output" | sed -n '3p')
+    [ "$branch_name" = "feat/login" ]
+    [ "$rel_path" = "auth.py" ]
+}
+
+@test "_resolve-branch-path fails for non-existent branch" {
+    cd "$REPO_DIR"
+    run wt _resolve-branch-path nonexistent/file.py
+    [ "$status" -ne 0 ]
+}
+
+@test "_resolve-branch-path fails without slash" {
+    cd "$REPO_DIR"
+    wt add some-branch >/dev/null 2>&1
+    run wt _resolve-branch-path some-branch
+    [ "$status" -ne 0 ]
+}
+
 @test "resolve_worktree rejects path outside any worktree" {
     cd "$REPO_DIR"
     local random_dir="$TEST_DIR/not-a-worktree"

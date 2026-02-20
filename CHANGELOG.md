@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.1
+
+### Fixed
+
+- `wt rm` no longer deletes pre-existing branches with unmerged work when no new commits were made in the worktree session. Previously, `wt add existingbranch && wt rm existingbranch` would delete the branch because HEAD equalled the recorded starting commit, even if the branch contained valuable unmerged work. Now always consults the merge check (`merge-base --is-ancestor`, local branch reachability, GitHub PR status) before deciding.
+
+## 0.5.0
+
+### Added
+
+- `wt cp` now supports branch-qualified paths: `wt cp branch/path/to/file.py .` pulls a specific file from another branch's worktree. Multiple files work too: `wt cp branch/a.py branch/b.py .`. Paths are resolved relative to the worktree root. The longest matching branch name is used, so `feature/login/file.py` correctly matches branch `feature/login` even if a `feature` branch also exists.
+
 ## 0.4.1
 
 ### Fixed
