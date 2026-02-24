@@ -143,3 +143,23 @@ load test_helper
     # Main file should still have original content
     grep -q "Original" "$REPO_DIR/CLAUDE.md"
 }
+
+@test "sync-agent: ignores agent files inside .venv" {
+    cd "$REPO_DIR"
+    commit_file "base.txt"
+    create_worktree "sync-venv"
+
+    local wt_dir
+    wt_dir=$(get_worktree_dir "sync-venv")
+
+    # Create an agent file inside .venv (simulating an installed package)
+    mkdir -p "$wt_dir/.venv/lib/python3.11/site-packages/somepkg"
+    echo "# Package CLAUDE.md" > "$wt_dir/.venv/lib/python3.11/site-packages/somepkg/CLAUDE.md"
+
+    cd "$wt_dir"
+    run wt sync-agent
+    [ "$status" -eq 0 ]
+    # Should NOT have copied the .venv CLAUDE.md to main
+    [ ! -f "$REPO_DIR/.venv/lib/python3.11/site-packages/somepkg/CLAUDE.md" ]
+    [[ "$output" != *".venv"* ]]
+}

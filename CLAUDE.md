@@ -4,7 +4,7 @@ Single-file bash tool (`wt`) for managing git worktrees.
 
 # Testing instructions
 
-After making any changes to `wt`, you should add the relevant tests. Tests in this repository are handled by `bats`. Before committing, verify all tests pass with `bats test/`. 
+After making any changes to `wt`, you should add the relevant tests. Tests in this repository are handled by `bats`. Before committing, verify all tests pass with `make -j test`. This runs each `.bats` file as a separate parallel `bats` process. To run a single test file: `bats test/sync_agent.bats`.
 
 ## Worktree resolution helpers
 

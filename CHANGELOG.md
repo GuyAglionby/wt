@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.2
+
+### Fixed
+
+- Fix editor (vim) broken during agent file conflict resolution. The editor was launched inside a `while read` loop (stdin redirected from process substitution) and within a `$()` subshell (stdout captured by the shell wrapper). Now redirects the editor to `/dev/tty` for both input and output.
+- Agent sync (`find_agent_files`) now skips `.venv/` and `node_modules/` directories, preventing installed packages' agent files from being synced.
+- `resolve_worktree` now finds worktrees in detached HEAD state when referenced by directory name (e.g. `worktree--repo--branch`). Previously failed because the branch-based lookup requires a `branch` line in porcelain output, which detached HEAD worktrees lack.
+
 ## 0.5.1
 
 ### Fixed

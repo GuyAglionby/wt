@@ -12,7 +12,7 @@ set -euo pipefail
 # Manual setup (alternative to wt install):
 #   Add to your .bashrc/.zshrc: eval "$(wt init)"
 
-WT_VERSION="0.5.1"
+WT_VERSION="0.5.2"
 WT_RAW_URL="https://raw.githubusercontent.com/GuyAglionby/wt/main/wt"
 
 # ─── Usage ────────────────────────────────────────────────────────────────────
@@ -179,6 +179,18 @@ resolve_worktree() {
         local branch
         branch=$(normalize_branch "$arg")
         worktree_path=$(find_worktree_for_branch "$repo_root" "$branch")
+    fi
+
+    # Fallback: match argument as a worktree directory basename (handles
+    # detached-HEAD worktrees where branch lookup fails)
+    if [[ -z "$worktree_path" ]]; then
+        worktree_path=$(git -C "$repo_root" worktree list --porcelain | awk -v name="$arg" '
+            /^worktree / {
+                path = substr($0, 10)
+                n = split(path, parts, "/")
+                if (parts[n] == name) { print path; exit }
+            }
+        ')
     fi
 
     if [[ -z "$worktree_path" ]]; then
@@ -412,7 +424,7 @@ find_agent_files() {
         fi
     done
 
-    find "$dir" -name .git -prune -o \( "${find_args[@]}" \) -type f -print 2>/dev/null
+    find "$dir" -name .git -prune -o -name .venv -prune -o -name node_modules -prune -o \( "${find_args[@]}" \) -type f -print 2>/dev/null
 }
 
 copy_agent_files_to_worktree() {
@@ -493,7 +505,7 @@ sync_agent_files() {
                     cp "$repo_file" "$merged"
                     if ! git merge-file "$merged" "$base_file" "$wt_file" 2>/dev/null; then
                         echo "Conflict in $rel_path - opening editor to resolve..."
-                        "${EDITOR:-vim}" "$merged"
+                        "${EDITOR:-vim}" "$merged" </dev/tty >/dev/tty
                         if grep -q "^<<<<<<<" "$merged"; then
                             echo "Error: unresolved conflicts in $rel_path" >&2
                             rm -f "$merged"

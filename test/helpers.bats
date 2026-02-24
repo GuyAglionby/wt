@@ -86,6 +86,24 @@ load test_helper
     [[ "$output" == *"__WT_CD__:${wt_dir}"* ]]
 }
 
+@test "resolve_worktree finds detached-HEAD worktree by directory name" {
+    cd "$REPO_DIR"
+    wt add detach-test >/dev/null 2>&1
+    local wt_dir
+    wt_dir=$(get_worktree_dir "detach-test")
+
+    # Detach HEAD in the worktree so it has no branch line in porcelain output
+    git -C "$wt_dir" checkout --detach HEAD >/dev/null 2>&1
+
+    local dir_name
+    dir_name=$(basename "$wt_dir")
+
+    # Should still resolve via directory basename matching
+    run wt cd "$dir_name"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"__WT_CD__:${wt_dir}"* ]]
+}
+
 @test "resolve_worktree rejects non-existent branch" {
     cd "$REPO_DIR"
     run wt cd nonexistent-branch
